@@ -24,7 +24,7 @@ extern osMessageQueueId_t uartTxQueueHandle;
  *
  * 사용할 UART를 바꿀 때 이 한 줄만 변경하면 된다.
  */
-static UART_HandleTypeDef * const communicationUart = &huart2;
+static UART_HandleTypeDef * const communicationUart = &huart1;
 
 
 
@@ -33,9 +33,34 @@ static uint8_t uart_dma_rx_buffer[UART_DMA_RX_BUFFER_SIZE];
 static UartDmaTxFrame_t uart_tx_active_frame;
 
 static volatile uint8_t uart_tx_busy = 0U;
+static volatile uint8_t uart_rx_recovery_requested = 0U;
 
+/* UART RX recovery debug */
+volatile uint32_t debugUartRxErrorCount = 0U;
+volatile uint32_t debugUartRxLastError = HAL_UART_ERROR_NONE;
+volatile uint32_t debugUartRxRecoveryCount = 0U;
 
+void HAL_UART_ErrorCallback(
+    UART_HandleTypeDef *huart
+)
+{
+    if (huart != communicationUart)
+    {
+        return;
+    }
 
+    /*
+     * ISR에서는 blocking HAL 함수나
+     * ReceiveToIdle 재시작을 직접 수행하지 않는다.
+     * 복구 요청만 기록하고 CommunicationTask에서 처리한다.
+     */
+    debugUartRxLastError =
+        HAL_UART_GetError(huart);
+
+    debugUartRxErrorCount++;
+
+    uart_rx_recovery_requested = 1U;
+}
 HAL_StatusTypeDef UartDma_StartReceive(void)
 {
     HAL_StatusTypeDef status;
@@ -105,7 +130,7 @@ void HAL_UARTEx_RxEventCallback(
      */
     if (UartDma_StartReceive() != HAL_OK)
     {
-        Error_Handler();
+    	uart_rx_recovery_requested = 1U;
     }
 }
 
@@ -170,6 +195,59 @@ void UartDma_ProcessTransmit(void)
     {
         uart_tx_busy = 0U;
     }
+}
+
+uint8_t UartDma_IsReceiveRecoveryRequested(void)
+{
+    return uart_rx_recovery_requested;
+}
+
+
+HAL_StatusTypeDef UartDma_RecoverReceive(void)
+{
+    HAL_StatusTypeDef status;
+
+    if (uart_rx_recovery_requested == 0U)
+    {
+        return HAL_OK;
+    }
+
+    uart_rx_recovery_requested = 0U;
+
+    /*
+     * 진행 중이거나 HAL에 남아 있는 RX 상태를
+     * RX 방향만 안전하게 정리한다.
+     */
+    (void)HAL_UART_AbortReceive(
+        communicationUart
+    );
+
+    /*
+     * STM32F4의 PE/FE/NE/ORE 플래그는
+     * SR 읽기 + DR 읽기 순서로 같이 정리된다.
+     */
+    __HAL_UART_CLEAR_OREFLAG(
+        communicationUart
+    );
+
+    communicationUart->ErrorCode =
+        HAL_UART_ERROR_NONE;
+
+    status = UartDma_StartReceive();
+
+    if (status == HAL_OK)
+    {
+        debugUartRxRecoveryCount++;
+    }
+    else
+    {
+        /*
+         * 다음 CommunicationTask 반복에서 재시도
+         */
+        uart_rx_recovery_requested = 1U;
+    }
+
+    return status;
 }
 
 void HAL_UART_TxCpltCallback(

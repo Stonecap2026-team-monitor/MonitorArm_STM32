@@ -7,4 +7,4 @@
 ../Core/Src/communicationTask.c:163:16:Communication_DegreeToX10	2
 ../Core/Src/communicationTask.c:181:16:Communication_SendCurrentAngle	4
 ../Core/Src/communicationTask.c:227:16:Communication_SendCurrentCommandAngles	3
-../Core/Src/communicationTask.c:274:6:StartCommunicationTask	39
+../Core/Src/communicationTask.c:274:6:StartCommunicationTask	41

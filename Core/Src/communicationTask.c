@@ -296,6 +296,35 @@ void StartCommunicationTask(void *argument)
 
     for (;;)
     {
+    	if (UartDma_IsReceiveRecoveryRequested() != 0U)
+    	{
+    	    /*
+    	     * UART 오류 전에 들어온 불완전한 데이터는 버린다.
+    	     */
+    	    Protocol_RxParserReset(&rxParser);
+
+    	    /*
+    	     * UART 오류 이전의 RX chunk도 폐기한다.
+    	     * CommunicationTask context이므로 ISR 호출이 아니다.
+    	     */
+    	    (void)osMessageQueueReset(
+    	        uartRxQueueHandle
+    	    );
+
+    	    if (UartDma_RecoverReceive() != HAL_OK)
+    	    {
+    	        /*
+    	         * 복구 flag가 다시 설정되므로
+    	         * 다음 loop에서 재시도한다.
+    	         */
+    	        osDelay(1U);
+    	        continue;
+    	    }
+
+    	    lastRxByteTick =
+    	        osKernelGetTickCount();
+    	}
+
     	if (osMessageQueueGet(uartRxQueueHandle, &rxChunk, NULL, 0U) == osOK){
     	    for (uint16_t i = 0U; i < rxChunk.length; i++){
     	        lastRxByteTick = osKernelGetTickCount();

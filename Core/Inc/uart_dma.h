@@ -15,6 +15,13 @@
 #define UART_DMA_RX_BUFFER_SIZE  64U
 #define UART_DMA_TX_BUFFER_SIZE  PROTOCOL_MAX_FRAME_LENGTH
 
+HAL_StatusTypeDef UartDma_RecoverReceive(void);
+uint8_t UartDma_IsReceiveRecoveryRequested(void);
+
+extern volatile uint32_t debugUartRxErrorCount;
+extern volatile uint32_t debugUartRxLastError;
+extern volatile uint32_t debugUartRxRecoveryCount;
+
 typedef struct
 {
     uint16_t length;

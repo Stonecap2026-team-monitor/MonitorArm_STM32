@@ -31,10 +31,11 @@ extern osMessageQueueId_t motorStatusQueueHandle;
 #define MOTOR_INIT_THETA2_DEG    0.0f
 #define MOTOR_INIT_THETA3_DEG    0.0f
 
-#define THETA1_POSITION_TOLERANCE_DEG       0.2f //목포값
+#define THETA1_POSITION_TOLERANCE_DEG       0.4f //목포값
 #define THETA1_MAX_CORRECTION_DEG           5.0f //최대 보정 각도
 
 #define THETA1_SETTLING_TIME_MS             150U //노이즈 떄문에 모터 끄고 150ms기다린 다음 시작
+#define THETA1_MAX_CORRECTION_COUNT 		3U
 
 #define THETA1_ENCODER_STABLE_SAMPLES       5U //5개 측정해서 평균
 #define THETA1_ENCODER_STABLE_TOLERANCE_DEG 0.3f
@@ -225,6 +226,16 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
     while (Motor_AbsFloat(debugTheta1PositionErrorDeg) >
            THETA1_POSITION_TOLERANCE_DEG)
     {
+    	if (debugTheta1CorrectionCount >= THETA1_MAX_CORRECTION_COUNT)
+    	{
+    	    Stepper_Disable();
+
+    	    Motor_EnterSafeStop(
+    	        MOTOR_ERROR_ENCODER
+    	    );
+
+    	    return 0U;
+    	}
     	if (Motor_HandleEstopRequest() != 0U)
     	    {
     	        return 0U;

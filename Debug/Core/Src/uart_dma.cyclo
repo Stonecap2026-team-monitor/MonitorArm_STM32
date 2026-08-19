@@ -1,5 +1,8 @@
-../Core/Src/uart_dma.c:39:19:UartDma_StartReceive	3
-../Core/Src/uart_dma.c:67:6:HAL_UARTEx_RxEventCallback	5
-../Core/Src/uart_dma.c:114:19:UartDma_QueueTransmit	5
-../Core/Src/uart_dma.c:148:6:UartDma_ProcessTransmit	4
-../Core/Src/uart_dma.c:175:6:HAL_UART_TxCpltCallback	2
+../Core/Src/uart_dma.c:43:6:HAL_UART_ErrorCallback	2
+../Core/Src/uart_dma.c:64:19:UartDma_StartReceive	3
+../Core/Src/uart_dma.c:92:6:HAL_UARTEx_RxEventCallback	5
+../Core/Src/uart_dma.c:139:19:UartDma_QueueTransmit	5
+../Core/Src/uart_dma.c:173:6:UartDma_ProcessTransmit	4
+../Core/Src/uart_dma.c:200:9:UartDma_IsReceiveRecoveryRequested	1
+../Core/Src/uart_dma.c:206:19:UartDma_RecoverReceive	3
+../Core/Src/uart_dma.c:253:6:HAL_UART_TxCpltCallback	2
