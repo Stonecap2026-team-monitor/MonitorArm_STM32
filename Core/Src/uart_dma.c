@@ -24,7 +24,7 @@ extern osMessageQueueId_t uartTxQueueHandle;
  *
  * 사용할 UART를 바꿀 때 이 한 줄만 변경하면 된다.
  */
-static UART_HandleTypeDef * const communicationUart = &huart1;
+static UART_HandleTypeDef * const communicationUart = &huart2;
 
 
 
