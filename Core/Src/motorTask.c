@@ -37,9 +37,9 @@ extern osMessageQueueId_t motorStatusQueueHandle;
 #define THETA1_SETTLING_TIME_MS             150U //노이즈 떄문에 모터 끄고 150ms기다린 다음 시작
 #define THETA1_MAX_CORRECTION_COUNT 		3U
 
-#define THETA1_ENCODER_STABLE_SAMPLES       5U //5개 측정해서 평균
-#define THETA1_ENCODER_STABLE_TOLERANCE_DEG 0.3f
-#define THETA1_ENCODER_TIMEOUT_MS            1000U
+#define THETA1_ENCODER_STABLE_SAMPLES       10U
+#define THETA1_ENCODER_STABLE_RANGE_DEG     0.3f
+#define THETA1_ENCODER_TIMEOUT_MS          4000U
 #define MOTOR_TASK_QUEUE_WAIT_MS    10U
 static float commandedTheta1Deg = 0.0f; // 마지막으로 명령한 theta1 목표각
 static float commandedTheta2Deg = 0.0f;
@@ -96,15 +96,17 @@ static float Motor_AbsFloat(float value)
     return value;
 }
 
+
 static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
 {
     uint32_t startTick;
     uint32_t lastReadCount;
-    uint32_t stableCount;
+    uint32_t stableCount = 0U;
 
     float currentAngleDeg;
-    float previousAngleDeg;
-    float angleSum;
+    float minAngleDeg = 0.0f;
+    float maxAngleDeg = 0.0f;
+    float angleSum = 0.0f;
 
     if (stableAngleDeg == NULL)
     {
@@ -114,14 +116,9 @@ static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
     startTick = osKernelGetTickCount();
     lastReadCount = encoderReadCount;
 
-    stableCount = 0U;
-    previousAngleDeg = 0.0f;
-    angleSum = 0.0f;
-
     while ((osKernelGetTickCount() - startTick) <
            THETA1_ENCODER_TIMEOUT_MS)
     {
-        //정상 측정시 시작
         if (encoderReadCount != lastReadCount)
         {
             lastReadCount = encoderReadCount;
@@ -130,7 +127,6 @@ static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
             {
                 stableCount = 0U;
                 angleSum = 0.0f;
-
                 osDelay(1U);
                 continue;
             }
@@ -139,37 +135,45 @@ static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
 
             if (stableCount == 0U)
             {
-                previousAngleDeg = currentAngleDeg;
+                minAngleDeg = currentAngleDeg;
+                maxAngleDeg = currentAngleDeg;
                 angleSum = currentAngleDeg;
                 stableCount = 1U;
             }
             else
             {
-                if (Motor_AbsFloat(
-                        currentAngleDeg - previousAngleDeg) <=
-                    THETA1_ENCODER_STABLE_TOLERANCE_DEG)
+                if (currentAngleDeg < minAngleDeg)
+                {
+                    minAngleDeg = currentAngleDeg;
+                }
+
+                if (currentAngleDeg > maxAngleDeg)
+                {
+                    maxAngleDeg = currentAngleDeg;
+                }
+
+                if ((maxAngleDeg - minAngleDeg) >
+                    THETA1_ENCODER_STABLE_RANGE_DEG)
+                {
+                    // 진동이 크면 측정 구간 초기화
+                    minAngleDeg = currentAngleDeg;
+                    maxAngleDeg = currentAngleDeg;
+                    angleSum = currentAngleDeg;
+                    stableCount = 1U;
+                }
+                else
                 {
                     angleSum += currentAngleDeg;
                     stableCount++;
-
-                    previousAngleDeg = currentAngleDeg;
 
                     if (stableCount >=
                         THETA1_ENCODER_STABLE_SAMPLES)
                     {
                         *stableAngleDeg =
-                            angleSum /
-                            (float)THETA1_ENCODER_STABLE_SAMPLES;
+                            angleSum / (float)stableCount;
 
                         return 1U;
                     }
-                }
-                else
-                {
-                    //값이 이상하면 다시.
-                    previousAngleDeg = currentAngleDeg;
-                    angleSum = currentAngleDeg;
-                    stableCount = 1U;
                 }
             }
         }
@@ -179,6 +183,7 @@ static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
 
     return 0U;
 }
+
 
 static uint8_t Motor_CorrectTheta1Position(float targetDeg)
 {
@@ -1102,7 +1107,7 @@ void StartMotorTask(void *argument)
 			     * 실제 버튼을 눌렀을 때 인터럽트가 발생했으므로
 			     * 눌린 상태를 HIGH로 사용.
 			     */
-			    if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_SET)
+			    if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET)
 			    {
 			        Motor_ReportError(MOTOR_ERROR_ESTOP);
 			        break;

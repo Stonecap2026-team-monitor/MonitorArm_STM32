@@ -61,7 +61,7 @@ static uint8_t Stepper_IsEstopActive(void)
      * CLEAR_ERROR에서도 동일한 기준을 사용 중.
      */
     if (HAL_GPIO_ReadPin(ESTOP_GPIO_Port,
-                         ESTOP_Pin) == GPIO_PIN_SET)
+            			ESTOP_Pin) == GPIO_PIN_RESET)
     {
         return 1U;
     }

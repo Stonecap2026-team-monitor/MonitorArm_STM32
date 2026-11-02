@@ -17,6 +17,9 @@
 #define SERVO_NEUTRAL_PULSE_US   1500U
 #define SERVO_MAX_PULSE_US       2500U
 
+#define SERVO_THETA2_ZERO_OFFSET_DEG (-16.0f)
+#define SERVO_THETA3_ZERO_OFFSET_DEG (-16.0f)
+
 #define SERVO_THETA2_CHANNEL     TIM_CHANNEL_1
 #define SERVO_THETA3_CHANNEL     TIM_CHANNEL_2
 
@@ -86,11 +89,11 @@ ServoStatus_t Servo_Init(void)
 
     __HAL_TIM_SET_COMPARE(&htim4,
                           SERVO_THETA2_CHANNEL,
-                          SERVO_NEUTRAL_PULSE_US);
+                          Servo_AngleToPulse(SERVO_THETA2_ZERO_OFFSET_DEG));
 
     __HAL_TIM_SET_COMPARE(&htim4,
                           SERVO_THETA3_CHANNEL,
-                          SERVO_NEUTRAL_PULSE_US);
+                          Servo_AngleToPulse(SERVO_THETA3_ZERO_OFFSET_DEG));
 
     status =
         HAL_TIM_PWM_Start(&htim4,
@@ -141,7 +144,26 @@ ServoStatus_t Servo_SetAngle(ServoChannel_t channel,
         return SERVO_ERROR_INVALID_CHANNEL;
     }
 
-    pulse_us = Servo_AngleToPulse(angle_deg);
+    float corrected_angle = angle_deg;
+
+    if (channel == SERVO_CHANNEL_THETA2)
+    {
+        corrected_angle = -angle_deg
+                        + SERVO_THETA2_ZERO_OFFSET_DEG;
+    }
+    else if (channel == SERVO_CHANNEL_THETA3)
+    {
+        corrected_angle = angle_deg
+                        + SERVO_THETA3_ZERO_OFFSET_DEG;
+    }
+
+    if ((corrected_angle < SERVO_MIN_ANGLE_DEG) ||
+        (corrected_angle > SERVO_MAX_ANGLE_DEG))
+    {
+        return SERVO_ERROR_INVALID_ANGLE;
+    }
+
+    pulse_us = Servo_AngleToPulse(corrected_angle);
 
     __HAL_TIM_SET_COMPARE(&htim4,
                           timer_channel,
