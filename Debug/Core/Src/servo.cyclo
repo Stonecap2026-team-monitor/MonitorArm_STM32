@@ -1,6 +1,6 @@
-../Core/Src/servo.c:36:14:Servo_MoveToward	5
-../Core/Src/servo.c:61:10:Servo_AngleToPulse	3
-../Core/Src/servo.c:83:15:Servo_Init	3
-../Core/Src/servo.c:119:15:Servo_SetAngle	9
-../Core/Src/servo.c:162:15:Servo_MoveSmooth	11
-../Core/Src/servo.c:232:6:Servo_GetCurrentAngles	3
+../Core/Src/servo.c:39:14:Servo_MoveToward	5
+../Core/Src/servo.c:64:10:Servo_AngleToPulse	3
+../Core/Src/servo.c:86:15:Servo_Init	3
+../Core/Src/servo.c:122:15:Servo_SetAngle	13
+../Core/Src/servo.c:184:15:Servo_MoveSmooth	11
+../Core/Src/servo.c:254:6:Servo_GetCurrentAngles	3
