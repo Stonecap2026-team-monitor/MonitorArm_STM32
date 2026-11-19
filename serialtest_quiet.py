@@ -1006,9 +1006,14 @@ def print_menu():
 # MAIN
 # ============================================================
 
-def main():
+def main(command_targets=None, command_handlers=None):
 
     global heartbeat_enabled
+
+    # BEGIN TEMP MOTION TEST: optional shortcuts supplied by the CSV logger.
+    command_targets = command_targets or {}
+    command_handlers = command_handlers or {}
+    # END TEMP MOTION TEST
 
     try:
 
@@ -1058,6 +1063,12 @@ def main():
 
             print_menu()
 
+            # BEGIN TEMP MOTION TEST
+            for name, angles in command_targets.items():
+                print(f"{name} : SET_TARGET {angles} deg (calibrated zero)")
+            for name in command_handlers:
+                print(f"{name} : guided measurement")
+            # END TEMP MOTION TEST
 
             # =================================================
             # COMMAND LOOP
@@ -1069,6 +1080,14 @@ def main():
                     "\n> "
                 ).strip().lower()
 
+                # BEGIN TEMP MOTION TEST
+                if command in command_handlers:
+                    command_handlers[command](ser)
+                    continue
+                if command in command_targets:
+                    send_set_target(ser, *command_targets[command])
+                    continue
+                # END TEMP MOTION TEST
 
                 # ---------------------------------------------
                 # SET_TARGET

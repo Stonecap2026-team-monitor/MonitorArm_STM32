@@ -31,14 +31,12 @@ extern osMessageQueueId_t motorStatusQueueHandle;
 #define MOTOR_INIT_THETA2_DEG    0.0f
 #define MOTOR_INIT_THETA3_DEG    0.0f
 
-#define THETA1_POSITION_TOLERANCE_DEG       0.4f //목포값
-#define THETA1_MAX_CORRECTION_DEG           5.0f //최대 보정 각도
+#define THETA1_POSITION_TOLERANCE_DEG       3.0f
+#define THETA1_MAX_CORRECTION_DEG          100.0f //최대 보정 각도
 
-#define THETA1_SETTLING_TIME_MS             150U //노이즈 떄문에 모터 끄고 150ms기다린 다음 시작
+#define THETA1_SETTLING_TIME_MS             2000U //모터 정지 후 2초 대기
 #define THETA1_MAX_CORRECTION_COUNT 		3U
 
-#define THETA1_ENCODER_STABLE_SAMPLES       10U
-#define THETA1_ENCODER_STABLE_RANGE_DEG     0.3f
 #define THETA1_ENCODER_TIMEOUT_MS          4000U
 #define MOTOR_TASK_QUEUE_WAIT_MS    10U
 static float commandedTheta1Deg = 0.0f; // 마지막으로 명령한 theta1 목표각
@@ -97,20 +95,14 @@ static float Motor_AbsFloat(float value)
 }
 
 
-static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
+static MotorError_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
 {
     uint32_t startTick;
     uint32_t lastReadCount;
-    uint32_t stableCount = 0U;
-
-    float currentAngleDeg;
-    float minAngleDeg = 0.0f;
-    float maxAngleDeg = 0.0f;
-    float angleSum = 0.0f;
 
     if (stableAngleDeg == NULL)
     {
-        return 0U;
+        return MOTOR_ERROR_ENCODER;
     }
 
     startTick = osKernelGetTickCount();
@@ -119,75 +111,40 @@ static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
     while ((osKernelGetTickCount() - startTick) <
            THETA1_ENCODER_TIMEOUT_MS)
     {
+        if ((motorEstopRequest != 0U) ||
+            (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET))
+        {
+            return MOTOR_ERROR_ESTOP;
+        }
+
+        if ((motorCommLostRequest != 0U) || (communicationLost != 0U))
+        {
+            return MOTOR_ERROR_COMM_LOST;
+        }
+
         if (encoderReadCount != lastReadCount)
         {
             lastReadCount = encoderReadCount;
 
-            if (encoderStatus != AS5600_OK)
+            if ((encoderStatus == AS5600_OK) &&
+                (encoderMovingAverageReady != 0U))
             {
-                stableCount = 0U;
-                angleSum = 0.0f;
-                osDelay(1U);
-                continue;
-            }
-
-            currentAngleDeg = currentEncoderAngleDeg;
-
-            if (stableCount == 0U)
-            {
-                minAngleDeg = currentAngleDeg;
-                maxAngleDeg = currentAngleDeg;
-                angleSum = currentAngleDeg;
-                stableCount = 1U;
-            }
-            else
-            {
-                if (currentAngleDeg < minAngleDeg)
-                {
-                    minAngleDeg = currentAngleDeg;
-                }
-
-                if (currentAngleDeg > maxAngleDeg)
-                {
-                    maxAngleDeg = currentAngleDeg;
-                }
-
-                if ((maxAngleDeg - minAngleDeg) >
-                    THETA1_ENCODER_STABLE_RANGE_DEG)
-                {
-                    // 진동이 크면 측정 구간 초기화
-                    minAngleDeg = currentAngleDeg;
-                    maxAngleDeg = currentAngleDeg;
-                    angleSum = currentAngleDeg;
-                    stableCount = 1U;
-                }
-                else
-                {
-                    angleSum += currentAngleDeg;
-                    stableCount++;
-
-                    if (stableCount >=
-                        THETA1_ENCODER_STABLE_SAMPLES)
-                    {
-                        *stableAngleDeg =
-                            angleSum / (float)stableCount;
-
-                        return 1U;
-                    }
-                }
+                *stableAngleDeg = filteredEncoderAngleDeg;
+                return MOTOR_ERROR_NONE;
             }
         }
 
         osDelay(1U);
     }
 
-    return 0U;
+    return MOTOR_ERROR_ENCODER;
 }
 
 
 static uint8_t Motor_CorrectTheta1Position(float targetDeg)
 {
     float stableTheta1Deg;
+    MotorError_t encoderResult;
     debugTheta1WithinTolerance = 0U;
     debugTheta1CorrectionCount = 0U;
 
@@ -214,9 +171,10 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
     /*
      * 이동 후 안정된 실제 위치 측정
      */
-    if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+    encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+    if (encoderResult != MOTOR_ERROR_NONE)
     {
-    	Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+        Motor_EnterSafeStop(encoderResult);
         return 0U;
     }
 
@@ -313,10 +271,10 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
 
         osDelay(THETA1_SETTLING_TIME_MS);
 
-        if (Motor_GetStableTheta1Angle(
-                &stableTheta1Deg) == 0U)
+        encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+        if (encoderResult != MOTOR_ERROR_NONE)
         {
-        	Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+            Motor_EnterSafeStop(encoderResult);
             return 0U;
         }
 
@@ -343,16 +301,6 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
     return 1U;
 }
 
-
-static uint8_t Motor_IsEncoderReady(void)
-{
-    if (encoderStatus != AS5600_OK)
-    {
-        return 0U;
-    }
-
-    return 1U;
-}
 
 static uint8_t Motor_Init(void)
 {
@@ -611,10 +559,7 @@ void StartMotorTask(void *argument)
 			{
 				float stableTheta1Deg;
 				ServoStatus_t servoSmoothStatus;
-				if (Motor_IsEncoderReady() == 0U){
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-				    break;
-				}
+				MotorError_t encoderResult;
 
 				if(Motor_CheckTarget(&command) == 0U){
 					Motor_ReportError(MOTOR_ERROR_INVALID_TARGET);
@@ -636,9 +581,10 @@ void StartMotorTask(void *argument)
 				theta1Deg = (float)command.theta1_x10 / 10.0f;
 
 				//제거
-				if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+				if (encoderResult != MOTOR_ERROR_NONE)
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_EnterSafeStop(encoderResult);
 					break;
 				}
 
@@ -732,16 +678,12 @@ void StartMotorTask(void *argument)
 			case MOTOR_COMMAND_SET_HOME:
 			{
 				float stableTheta1Deg;
+				MotorError_t encoderResult;
 
-				if (Motor_IsEncoderReady() == 0U)
+				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+				if (encoderResult != MOTOR_ERROR_NONE)
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-					break;
-				}
-
-				if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
-				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_EnterSafeStop(encoderResult);
 					break;
 				}
 
@@ -763,12 +705,7 @@ void StartMotorTask(void *argument)
 				float stableTheta1Deg;
 				float theta1MoveDeg;
 				ServoStatus_t servoSmoothStatus;
-
-				if (Motor_IsEncoderReady() == 0U)
-				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-					break;
-				}
+				MotorError_t encoderResult;
 
 				if (homeValid == 0U)
 				{
@@ -784,9 +721,10 @@ void StartMotorTask(void *argument)
 				}
 
 				/* 이동 전 안정된 실제 Theta1 측정 */
-				if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+				if (encoderResult != MOTOR_ERROR_NONE)
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_EnterSafeStop(encoderResult);
 					break;
 				}
 
@@ -900,12 +838,7 @@ void StartMotorTask(void *argument)
 					{
 						float stableTheta1Deg;
 						float theta1MoveDeg;
-
-						if (Motor_IsEncoderReady() == 0U)
-						{
-							Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-							break;
-						}
+						MotorError_t encoderResult;
 
 						if (Stepper_IsBusy() != 0U)
 						{
@@ -918,10 +851,10 @@ void StartMotorTask(void *argument)
 						 * JOG 기준 위치도 단일 측정값이 아니라
 						 * 안정된 실제 위치를 사용
 						 */
-						if (Motor_GetStableTheta1Angle(
-								&stableTheta1Deg) == 0U)
+						encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+						if (encoderResult != MOTOR_ERROR_NONE)
 						{
-							Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+							Motor_EnterSafeStop(encoderResult);
 							break;
 						}
 
@@ -1099,6 +1032,7 @@ void StartMotorTask(void *argument)
 				float stableTheta1Deg;
 				float currentTheta2Deg;
 				float currentTheta3Deg;
+				MotorError_t encoderResult;
 			    /*
 			     * ESTOP 버튼이 아직 눌려 있으면
 			     * ERROR 해제 금지
@@ -1123,12 +1057,6 @@ void StartMotorTask(void *argument)
 			        break;
 			    }
 
-			    if (Motor_IsEncoderReady() == 0U)
-			    {
-			        Motor_ReportError(MOTOR_ERROR_ENCODER);
-			        break;
-			    }
-
 			    if (Stepper_IsBusy() != 0U)
 			    {
 			        Motor_ReportError(MOTOR_ERROR_STEPPER_BUSY);
@@ -1137,9 +1065,10 @@ void StartMotorTask(void *argument)
 
 			    Stepper_EmergencyStop();
 
-			    if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+			    encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+			    if (encoderResult != MOTOR_ERROR_NONE)
 			    {
-			        Motor_ReportError(MOTOR_ERROR_ENCODER);
+			        Motor_ReportError(encoderResult);
 			        break;
 			    }
 
