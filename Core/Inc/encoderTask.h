@@ -12,6 +12,8 @@
 void StartEncoderTask(void *argument);
 
 extern volatile float currentEncoderAngleDeg;
+extern volatile float filteredEncoderAngleDeg;
+extern volatile uint8_t encoderMovingAverageReady;
 extern volatile AS5600_Status_t encoderStatus;
 extern volatile uint32_t encoderReadCount;
 #endif /* INC_ENCODERTASK_H_ */
