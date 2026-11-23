@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+/* Diagnostic timestamps use HAL_GetTick (ms). No change to motor timing. */
+typedef struct {
+    uint32_t moveId, startTick, stopTick, requestedSteps;
+    int32_t directionSign;
+    uint32_t stopReason; /* 0: not stopped, 1: completed, 2: emergency, 3: HAL error */
+} StepperTrace_t;
+extern volatile StepperTrace_t debugStepperTrace;
+
 typedef enum
 {
     STEPPER_OK = 0,

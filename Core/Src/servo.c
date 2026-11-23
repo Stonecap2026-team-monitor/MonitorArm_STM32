@@ -184,6 +184,12 @@ ServoStatus_t Servo_SetAngle(ServoChannel_t channel,
 ServoStatus_t Servo_MoveSmooth(float theta2_deg,
                                float theta3_deg)
 {
+    return Servo_MoveSmoothMonitored(theta2_deg, theta3_deg, 0);
+}
+
+ServoStatus_t Servo_MoveSmoothMonitored(float theta2_deg, float theta3_deg,
+                                      uint8_t (*keepMoving)(void))
+{
     ServoStatus_t status;
     float nextTheta2Deg;
     float nextTheta3Deg;
@@ -199,6 +205,7 @@ ServoStatus_t Servo_MoveSmooth(float theta2_deg,
     while ((servoTheta2CurrentDeg != theta2_deg) ||
            (servoTheta3CurrentDeg != theta3_deg))
     {
+        if (keepMoving != 0 && !keepMoving()) return SERVO_ERROR_MONITOR;
         /* ESTOP 최우선 */
         if (motorEstopRequest != 0U)
         {

@@ -47,6 +47,7 @@
 static volatile uint32_t stepCount = 0U;
 static volatile uint32_t targetStepCount = 0U;
 static volatile uint8_t stepperBusy = 0U;
+volatile StepperTrace_t debugStepperTrace = {0};
 extern volatile uint8_t motorCommLostRequest;
 extern volatile uint8_t motorEstopRequest;
 
@@ -103,6 +104,10 @@ void Stepper_EmergencyDisableFromISR(void)
 
 void Stepper_EmergencyStop(void)
 {
+    if (stepperBusy != 0U) {
+        debugStepperTrace.stopTick = HAL_GetTick();
+        debugStepperTrace.stopReason = 2U;
+    }
     (void)HAL_TIM_PWM_Stop_IT(&htim3,
                               STEPPER_TIMER_CHANNEL);
 
@@ -202,6 +207,8 @@ void Stepper_HandlePulseFinished(void)
 
         Stepper_Disable();
 
+        debugStepperTrace.stopTick = HAL_GetTick();
+        debugStepperTrace.stopReason = 1U;
         stepCount = 0U;
         targetStepCount = 0U;
         stepperBusy = 0U;
@@ -260,6 +267,12 @@ StepperStatus_t Stepper_MoveRelative(float angle_deg)
         return STEPPER_ERROR_INVALID_ANGLE;
     }
 
+    debugStepperTrace.moveId++;
+    debugStepperTrace.directionSign = (direction == STEPPER_DIRECTION_CW) ? 1 : -1;
+    debugStepperTrace.requestedSteps = requestedSteps;
+    debugStepperTrace.startTick = HAL_GetTick();
+    debugStepperTrace.stopTick = 0U;
+    debugStepperTrace.stopReason = 0U;
     Stepper_SetDirection(direction);
 
 
@@ -299,6 +312,8 @@ StepperStatus_t Stepper_MoveRelative(float angle_deg)
 
     if (halStatus != HAL_OK)
     {
+        debugStepperTrace.stopTick = HAL_GetTick();
+        debugStepperTrace.stopReason = 3U;
     	Stepper_Disable();
 
     	__HAL_TIM_SET_COMPARE(&htim3, STEPPER_TIMER_CHANNEL, 0U);

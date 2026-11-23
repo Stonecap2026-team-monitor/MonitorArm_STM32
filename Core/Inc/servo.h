@@ -23,7 +23,8 @@ typedef enum
     SERVO_ERROR_INVALID_ANGLE,
     SERVO_ERROR_HAL,
 	SERVO_ERROR_ESTOP,
-	SERVO_ERROR_COMM_LOST
+	SERVO_ERROR_COMM_LOST,
+    SERVO_ERROR_MONITOR
 } ServoStatus_t;
 
 ServoStatus_t Servo_Init(void);
@@ -34,6 +35,8 @@ ServoStatus_t Servo_SetAngle(ServoChannel_t channel,
 uint16_t Servo_AngleToPulse(float angle_deg);
 
 ServoStatus_t Servo_MoveSmooth(float theta2_deg, float theta3_deg);
+ServoStatus_t Servo_MoveSmoothMonitored(float theta2_deg, float theta3_deg,
+                                      uint8_t (*keepMoving)(void));
 
 void Servo_GetCurrentAngles(float *theta2_deg, float *theta3_deg);
 

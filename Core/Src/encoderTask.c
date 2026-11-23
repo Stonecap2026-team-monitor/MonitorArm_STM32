@@ -15,10 +15,11 @@
 #define ENCODER_TASK_PERIOD_MS    20U
 #define ENCODER_MOVING_AVERAGE_SAMPLES 3U
 
-#define THETA1_ZERO_OFFSET_DEG    343.47f //측정 후 병경
+#define THETA1_ZERO_OFFSET_DEG    13.44f //수평 자세의 엔코더 절대각
 
 #define ENCODER_I2C_RECOVERY_ERROR_COUNT    3U
 #define ENCODER_I2C_RECOVERY_DELAY_MS       20U
+#define ENCODER_I2C_RECOVERY_RETRY_MS       250U
 
 volatile float currentEncoderAbsoluteAngleDeg = 0.0f;
 volatile float currentEncoderAngleDeg = 0.0f;
@@ -35,6 +36,14 @@ volatile uint32_t encoderHalError = HAL_I2C_ERROR_NONE;
 volatile HAL_I2C_StateTypeDef encoderI2cState;
 
 volatile uint32_t encoderRecoveryCount = 0U;
+/* Success requires a subsequent sensor read, not merely HAL initialization. */
+volatile uint32_t encoderRecoverySuccessCount = 0U;
+volatile uint32_t encoderRecoveryFailureCount = 0U;
+/* 0=none, 1=read restored, 2=SCL low, 3=SDA low, 4=HAL init/deinit,
+ * 5=read still failed, 6=waiting for verification. */
+volatile uint32_t encoderRecoveryResult = 0U;
+volatile uint32_t encoderRecoveryLines = 0U; /* PB8/PB9 IDR masked by 0x300 */
+static uint8_t encoderRecoveryPending = 0U;
 
 static uint32_t encoderConsecutiveErrorCount = 0U;
 static float encoderAngleWindow[ENCODER_MOVING_AVERAGE_SAMPLES];
@@ -85,23 +94,103 @@ static void Encoder_UpdateMovingAverage(float relativeAngleDeg)
 }
 
 
+static uint8_t Encoder_WaitLineHigh(uint16_t pin)
+{
+    /* Bounded wait for line release/clock stretching; never drive HIGH. */
+    for (uint8_t wait = 0U; wait < 10U; wait++)
+    {
+        if (HAL_GPIO_ReadPin(GPIOB, pin) == GPIO_PIN_SET) return 1U;
+        osDelay(1U);
+    }
+    return HAL_GPIO_ReadPin(GPIOB, pin) == GPIO_PIN_SET;
+}
+
 static uint8_t Encoder_RecoverI2C(void)
 {
-
+    GPIO_InitTypeDef gpio = {0};
+    uint8_t cleared = 1U;
+    encoderRecoveryCount++;
+    encoderRecoveryPending = 0U;
+    encoderRecoveryResult = 6U;
+    Encoder_ResetMovingAverage();
     if (HAL_I2C_DeInit(&hi2c1) != HAL_OK)
     {
+        encoderRecoveryResult = 4U;
+        encoderRecoveryFailureCount++;
         return 0U;
     }
 
+    /* I2C1 is used only by this task. GPIO open-drain releases the lines
+     * through their existing external pull-ups; it never drives them HIGH.
+     * NXP UM10204 3.1.16: at most nine clocks to clear SDA held LOW. */
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_SET);
+    gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &gpio);
+    if (!Encoder_WaitLineHigh(GPIO_PIN_8))
+    {
+        encoderRecoveryResult = 2U;
+        cleared = 0U;
+    }
+    for (uint8_t pulse = 0U; cleared && pulse < 9U &&
+         HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_RESET; pulse++)
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+        osDelay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        if (!Encoder_WaitLineHigh(GPIO_PIN_8))
+        {
+            encoderRecoveryResult = 2U;
+            cleared = 0U;
+            break;
+        }
+        osDelay(1U);
+    }
+    if (cleared)
+    {
+        /* STOP: lower SCL first, lower SDA, release SCL, then release SDA. */
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+        osDelay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+        osDelay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        if (!Encoder_WaitLineHigh(GPIO_PIN_8))
+        {
+            encoderRecoveryResult = 2U;
+            cleared = 0U;
+        }
+        osDelay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
+        if (cleared && !Encoder_WaitLineHigh(GPIO_PIN_9))
+        {
+            encoderRecoveryResult = 3U;
+            cleared = 0U;
+        }
+    }
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_SET);
+    encoderRecoveryLines = GPIOB->IDR & (GPIO_PIN_8 | GPIO_PIN_9);
+
+    /* Reset the STM peripheral as well. HAL init restores AF4 GPIO via MSP.
+     * Avoid MX_I2C1_Init's fatal Error_Handler on a failed recovery. */
+    __HAL_RCC_I2C1_CLK_ENABLE();
+    __HAL_RCC_I2C1_FORCE_RESET();
+    __HAL_RCC_I2C1_RELEASE_RESET();
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+    {
+        encoderRecoveryResult = 4U;
+        cleared = 0U;
+    }
     osDelay(ENCODER_I2C_RECOVERY_DELAY_MS);
-
-    MX_I2C1_Init();
-
-    osDelay(ENCODER_I2C_RECOVERY_DELAY_MS);
-
-    encoderRecoveryCount++;
-
-    return 1U;
+    if (!cleared)
+    {
+        encoderRecoveryFailureCount++;
+        return 0U;
+    }
+    encoderRecoveryPending = 1U;
+    return 1U; /* Verified by the next ordinary sensor read. */
 }
 
 static float Encoder_CalculateRelativeAngle(float absoluteAngleDeg)
@@ -137,6 +226,12 @@ void StartEncoderTask(void *argument)
 
         if (status == AS5600_OK)
         {
+            if (encoderRecoveryPending)
+            {
+                encoderRecoveryPending = 0U;
+                encoderRecoverySuccessCount++;
+                encoderRecoveryResult = 1U;
+            }
             currentEncoderAbsoluteAngleDeg = absoluteAngleDeg;
 
             currentEncoderAngleDeg =
@@ -156,6 +251,12 @@ void StartEncoderTask(void *argument)
         }
         else
         {
+            if (encoderRecoveryPending)
+            {
+                encoderRecoveryPending = 0U;
+                encoderRecoveryFailureCount++;
+                encoderRecoveryResult = 5U;
+            }
             encoderErrorCount++;
             encoderConsecutiveErrorCount++;
             /* Do not average measurements separated by a failed read. */
@@ -173,7 +274,8 @@ void StartEncoderTask(void *argument)
             if (encoderConsecutiveErrorCount >=
                 ENCODER_I2C_RECOVERY_ERROR_COUNT)
             {
-                (void)Encoder_RecoverI2C();
+                if (!Encoder_RecoverI2C())
+                    osDelay(ENCODER_I2C_RECOVERY_RETRY_MS);
 
                 /*
                  * 재초기화 후 다시 3회 연속 실패해야
