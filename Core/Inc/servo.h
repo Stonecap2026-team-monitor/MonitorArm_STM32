@@ -27,7 +27,7 @@ typedef enum
     SERVO_ERROR_MONITOR
 } ServoStatus_t;
 
-ServoStatus_t Servo_Init(void);
+uint8_t Servo_IsOutputActive(void);
 
 ServoStatus_t Servo_SetAngle(ServoChannel_t channel,
                              float angle_deg);

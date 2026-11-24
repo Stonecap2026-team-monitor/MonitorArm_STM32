@@ -28,9 +28,6 @@ extern osMessageQueueId_t motorStatusQueueHandle;
 #define THETA3_MIN_X10   (-1050)
 #define THETA3_MAX_X10   1050
 
-#define MOTOR_INIT_THETA2_DEG    0.0f
-#define MOTOR_INIT_THETA3_DEG    0.0f
-
 #define THETA1_POSITION_TOLERANCE_DEG       3.0f
 #define THETA1_MAX_CORRECTION_DEG          100.0f //최대 보정 각도
 
@@ -156,7 +153,7 @@ static MotorError_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
 }
 
 
-/* New path commands only; legacy command completion semantics stay intact. */
+/* Encoder feedback for coordinated moves. */
 volatile uint32_t debugPathPhase = 0U; /* 1: axes, 2: settling, 3: sample, 4: correction, 5: done, 6: failed */
 volatile uint32_t debugPathSettlingTick = 0U;
 volatile uint32_t debugPathSampleTick = 0U;
@@ -465,32 +462,6 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
 }
 
 
-static uint8_t Motor_Init(void)
-{
-    Stepper_Init();
-
-    if (Servo_Init() != SERVO_OK)
-    {
-        return 0U;
-    }
-
-    if (Servo_SetAngle(SERVO_CHANNEL_THETA2, MOTOR_INIT_THETA2_DEG) != SERVO_OK)
-    {
-        return 0U;
-    }
-
-    if (Servo_SetAngle(SERVO_CHANNEL_THETA3, MOTOR_INIT_THETA3_DEG) != SERVO_OK)
-    {
-        return 0U;
-    }
-
-    commandedTheta1Deg = currentEncoderAngleDeg;
-    commandedTheta2Deg = MOTOR_INIT_THETA2_DEG;
-    commandedTheta3Deg = MOTOR_INIT_THETA3_DEG;
-
-    return 1U;
-}
-
 static uint8_t Motor_IsAngleInRange(MotorAxis_t axis, float angleDeg)
 {
     switch (axis)
@@ -661,14 +632,8 @@ void StartMotorTask(void *argument)
 
     motorState = MOTOR_STATE_INIT;
 
-    if (Motor_Init() == 0U)
-    {
-    	Motor_EnterSafeStop(MOTOR_ERROR_INIT);
-    }
-    else
-    {
-    	motorState = MOTOR_STATE_IDLE;
-    }
+    Stepper_Init();
+    motorState = MOTOR_STATE_IDLE;
 
     for (;;)
     {
@@ -872,6 +837,12 @@ void StartMotorTask(void *argument)
 			{
 				float stableTheta1Deg;
 				MotorError_t encoderResult;
+
+				if (!Servo_IsOutputActive())
+				{
+					Motor_ReportError(MOTOR_ERROR_INIT);
+					break;
+				}
 
 				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
 				if (encoderResult != MOTOR_ERROR_NONE)
@@ -1081,6 +1052,13 @@ void StartMotorTask(void *argument)
 				        motorState = MOTOR_STATE_IDLE;
 				        Motor_ReportCommandDone((uint8_t)command.type);
 				        break;
+				}
+
+				if ((command.axis == MOTOR_AXIS_THETA2 || command.axis == MOTOR_AXIS_THETA3) &&
+				    !Servo_IsOutputActive())
+				{
+					Motor_ReportError(MOTOR_ERROR_INIT);
+					break;
 				}
 
 				switch (command.axis){

@@ -9,6 +9,7 @@
 #include "servo.h"
 #include "cmsis_os.h"
 #include "tim.h"
+#include "communicationTask.h"
 
 #define SERVO_MIN_ANGLE_DEG      (-135.0f)
 #define SERVO_MAX_ANGLE_DEG      135.0f
@@ -32,6 +33,7 @@ extern volatile uint8_t motorCommLostRequest;
 
 static float servoTheta2CurrentDeg = 0.0f;
 static float servoTheta3CurrentDeg = 0.0f;
+static uint8_t servoOutputActive = 0U;
 
 
 
@@ -83,17 +85,30 @@ uint16_t Servo_AngleToPulse(float angle_deg)
     return (uint16_t)(pulse_us + 0.5f);
 }
 
-ServoStatus_t Servo_Init(void)
+uint8_t Servo_IsOutputActive(void)
+{
+    return servoOutputActive;
+}
+
+static ServoStatus_t Servo_StartAtTarget(float theta2_deg, float theta3_deg)
 {
     HAL_StatusTypeDef status;
+    ServoStatus_t angleStatus;
 
-    __HAL_TIM_SET_COMPARE(&htim4,
-                          SERVO_THETA2_CHANNEL,
-                          Servo_AngleToPulse(SERVO_THETA2_ZERO_OFFSET_DEG));
+    /* There is no position feedback to seed a ramp before the first command. */
+    angleStatus = Servo_SetAngle(SERVO_CHANNEL_THETA2, theta2_deg);
+    if (angleStatus != SERVO_OK)
+    {
+        return angleStatus;
+    }
+    angleStatus = Servo_SetAngle(SERVO_CHANNEL_THETA3, theta3_deg);
+    if (angleStatus != SERVO_OK)
+    {
+        return angleStatus;
+    }
 
-    __HAL_TIM_SET_COMPARE(&htim4,
-                          SERVO_THETA3_CHANNEL,
-                          Servo_AngleToPulse(SERVO_THETA3_ZERO_OFFSET_DEG));
+    /* Load the preloaded compares before the first PWM frame. */
+    htim4.Instance->EGR = TIM_EGR_UG;
 
     status =
         HAL_TIM_PWM_Start(&htim4,
@@ -116,6 +131,7 @@ ServoStatus_t Servo_Init(void)
         return SERVO_ERROR_HAL;
     }
 
+    servoOutputActive = 1U;
     return SERVO_OK;
 }
 
@@ -200,6 +216,21 @@ ServoStatus_t Servo_MoveSmoothMonitored(float theta2_deg, float theta3_deg,
         (theta3_deg > SERVO_MAX_ANGLE_DEG))
     {
         return SERVO_ERROR_INVALID_ANGLE;
+    }
+
+    if (servoOutputActive == 0U)
+    {
+        if (keepMoving != 0 && !keepMoving()) return SERVO_ERROR_MONITOR;
+        if (motorEstopRequest != 0U ||
+            HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET)
+        {
+            return SERVO_ERROR_ESTOP;
+        }
+        if (motorCommLostRequest != 0U || communicationLost != 0U)
+        {
+            return SERVO_ERROR_COMM_LOST;
+        }
+        return Servo_StartAtTarget(theta2_deg, theta3_deg);
     }
 
     while ((servoTheta2CurrentDeg != theta2_deg) ||
