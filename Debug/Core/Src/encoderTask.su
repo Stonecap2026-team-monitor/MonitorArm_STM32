@@ -1,3 +1,0 @@
-../Core/Src/encoderTask.c:37:16:Encoder_RecoverI2C	8	static
-../Core/Src/encoderTask.c:56:14:Encoder_CalculateRelativeAngle	24	static
-../Core/Src/encoderTask.c:74:6:StartEncoderTask	24	static

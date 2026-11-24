@@ -1,6 +1,0 @@
-../Core/Src/protocol.c:14:9:Protocol_CalculateChecksum	4
-../Core/Src/protocol.c:30:18:Protocol_BuildFrame	8
-../Core/Src/protocol.c:86:6:Protocol_RxParserInit	1
-../Core/Src/protocol.c:91:6:Protocol_RxParserReset	2
-../Core/Src/protocol.c:110:6:Protocol_RxProcessByte	13
-../Core/Src/protocol.c:180:18:Protocol_RxDecodeMessage	8
