@@ -52,7 +52,7 @@ def load_plan(path):
         if len(row) != 3 or any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in row):
             raise ValueError("Each target must contain three finite angles")
         # Match motorTask joint limits (servo driver additionally validates calibration).
-        for value, bounds in zip(row, [(-45, 90), (-105, 105), (-105, 105)]):
+        for value, bounds in zip(row, [(-45, 80), (-105, 105), (-105, 105)]):
             if not bounds[0] <= value <= bounds[1]:
                 raise ValueError(f"Target out of range: {row}")
     if plan["down"][-1] != plan["start"]:
@@ -67,22 +67,34 @@ class Sequence:
         self.state, self.pending, self.steps = "unprepared", None, []
         self.after = None
         self.index = 0
+        self.waiting = None
+        self.angle_sample = None
+        self.angle_count = 0
 
     def fail(self, reason):
         self.log("blocked", reason)
         self.state, self.pending, self.steps = "blocked", None, []
+        self.waiting = None
 
     def command(self, name, now):
-        if self.pending is not None:
+        if self.pending is not None or self.waiting is not None:
             self.log("rejected", "Busy; command discarded")
+            return
+        if self.state == "blocked" and name != "r":
+            self.log("rejected", "Sequence blocked; inspect the error, then use r to clear")
             return
         if name == "r":
             steps, after = [(0x14, b"")], "unprepared"
-        elif name == "prepare" and self.state == "unprepared":
-            steps, after = [(0x1B, self.angles(self.plan["start"]))], "home"
-        elif name == "run" and self.state == "home":
+        elif name == "prepare":
+            if self.plan["start"] != [0, 0, 0]:
+                self.log("rejected", "Staged prepare requires JSON start [0, 0, 0]")
+                return
+            steps = [("servo", angle) for angle in (-50, -30, 0)]
+            steps += [("wait", 3.0), (0x1B, self.angles(self.plan["start"]))]
+            after = "home"
+        elif name == "run":
             steps, after = self.path("up"), "top"
-        elif name == "down" and self.state == "top":
+        elif name == "down":
             steps, after = self.path("down"), "home"
         else:
             self.log("rejected", f"Cannot {name} from {self.state}; use r, prepare, run, down, q")
@@ -105,6 +117,14 @@ class Sequence:
             self.log("sequence_done", self.state)
             return
         msg, data = self.steps.pop(0)
+        if msg in ("servo", "wait"):
+            self.pending = None
+            self.waiting = (msg, data, now + (4.0 if msg == "servo" else data), self.angle_count)
+            self.log("waiting", "Fresh theta1 sample" if msg == "servo" else "Settling for 3s")
+            return
+        self.send_move(msg, data, now)
+
+    def send_move(self, msg, data, now):
         self.index += 1
         self.pending, self.deadline = msg, now + self.timeout
         self.log("request", f"phase={self.state};segment={self.index};id={msg:02x};data={data.hex()}")
@@ -112,9 +132,16 @@ class Sequence:
 
     def receive(self, msg, data, now):
         # A late DONE must never start another motor command.
-        self.poll(now)
+        self.poll(now, advance_wait=False)
         if msg == 0x83:
+            was_blocked = self.state == "blocked"
             self.fail(f"STM ERROR {data.hex()}; no automatic retry")
+            if data == b"\x03" and not was_blocked:
+                self.state = "angle_limit"
+                self.log("recovery", "Angle limit: enter a new command; STM permits a lower theta1 target within limits")
+        elif msg == 0x84 and len(data) == 2:
+            self.angle_sample = (struct.unpack(">h", data)[0], now)
+            self.angle_count += 1
         elif msg == 0x82:
             if self.pending is not None and data == bytes([self.pending]):
                 self.log("done", f"phase={self.state};segment={self.index};id={data.hex()}")
@@ -122,15 +149,39 @@ class Sequence:
             else:
                 self.fail(f"Unexpected DONE {data.hex()}; sequence uncertain")
 
-    def poll(self, now):
+    def poll(self, now, advance_wait=True):
         if self.pending is not None and now >= self.deadline:
             self.fail("Completion timeout; arrival unknown")
+        if self.waiting is None:
+            return
+        kind, value, deadline, first_sample = self.waiting
+        if kind == "servo" and now >= deadline:
+            self.fail("No fresh theta1 sample for prepare within 4s")
+            return
+        if not advance_wait:
+            return
+        if kind == "wait" and now >= deadline:
+            self.waiting = None
+            self.advance(now)
+        elif kind == "servo" and self.angle_count > first_sample:
+            theta1, sample_time = self.angle_sample
+            if now - sample_time > 0.5:
+                return
+            if not -450 <= theta1 <= 800:
+                self.fail("Measured theta1 outside command limits; prepare cancelled")
+                return
+            self.waiting = None
+            # Intermediate move avoids final correction during servo staging.
+            # STM still checks feedback and may issue small STEP movements.
+            self.send_move(0x1A, struct.pack(">hhh", theta1, value * 10, 0), now)
 
     def receive_batch(self, received, now):
         # ERROR wins even when DONE arrived in the same read.
         errors = [(msg, data) for msg, data in received if msg == 0x83]
         if errors:
-            self.receive(*errors[0], now)
+            # A simultaneous sensor/link/ESTOP error still requires r.
+            error = next((item for item in errors if item[1] != b"\x03"), errors[0])
+            self.receive(*error, now)
         elif sum(msg == 0x82 for msg, _ in received) > 1:
             # Unsent commands cannot already have completions in this buffer.
             self.fail("Multiple buffered DONEs; sequence uncertain")
@@ -178,8 +229,11 @@ def main():
 
         seq = Sequence(plan, port.write, log)
         buffer, next_hb, counter = bytearray(), 0, 0
-        print("No automatic initial motion. r -> wait -> prepare -> wait -> run -> wait -> down.")
+        print("Choose prepare, run, or down in any order; wait for completion before the next command.")
+        print("run/down always visit the JSON targets in order, starting from the current position.")
         print(f"prepare moves ALL axes to {plan['start']}; it does not set STM HOME.")
+        print("prepare: measured theta1 + theta2 -50/-30/0, theta3 0; wait 3s, then (0,0,0).")
+        print("STEP may move slightly during servo staging; STM feedback protection remains active.")
         print("q saves/exits; it is NOT an immediate motor stop. Use hardware ESTOP when needed.")
         print("On error: inspect before clearing; do not automatically resume the sequence.")
         print("CSV:", output.resolve())

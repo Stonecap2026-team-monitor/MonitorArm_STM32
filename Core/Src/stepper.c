@@ -2,6 +2,7 @@
 #include "cmsis_os.h"
 #include "gpio.h"
 #include "tim.h"
+#include "encoderTask.h"
 #include <math.h>
 
 /*
@@ -48,6 +49,7 @@ static volatile uint32_t stepCount = 0U;
 static volatile uint32_t targetStepCount = 0U;
 static volatile uint8_t stepperBusy = 0U;
 volatile StepperTrace_t debugStepperTrace = {0};
+volatile uint8_t stepperAngleLimitHit = 0U;
 extern volatile uint8_t motorCommLostRequest;
 extern volatile uint8_t motorEstopRequest;
 
@@ -190,6 +192,17 @@ void Stepper_HandlePulseFinished(void)
         return;
     }
 
+    /* Check the latest raw measurement on every pulse. Falling motion is
+     * permitted so a new command can return from above the limit. */
+    if (debugStepperTrace.directionSign > 0 && encoderStatus == AS5600_OK &&
+        currentEncoderAngleDeg >= THETA1_MEASURED_STOP_DEG)
+    {
+        stepperAngleLimitHit = 1U;
+        Stepper_EmergencyStop();
+        debugStepperTrace.stopReason = 4U;
+        return;
+    }
+
     stepCount++;
 
     if (stepCount >= targetStepCount)
@@ -252,6 +265,12 @@ StepperStatus_t Stepper_MoveRelative(float angle_deg)
 
     if (angle_deg > 0.0f)
     {
+        if (encoderStatus == AS5600_OK &&
+            currentEncoderAngleDeg >= THETA1_MEASURED_STOP_DEG)
+        {
+            stepperAngleLimitHit = 1U;
+            return STEPPER_ERROR_ANGLE_LIMIT;
+        }
         direction = STEPPER_DIRECTION_CW;
     }
     else

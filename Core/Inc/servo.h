@@ -24,7 +24,8 @@ typedef enum
     SERVO_ERROR_HAL,
 	SERVO_ERROR_ESTOP,
 	SERVO_ERROR_COMM_LOST,
-    SERVO_ERROR_MONITOR
+    SERVO_ERROR_MONITOR,
+    SERVO_ERROR_ANGLE_LIMIT
 } ServoStatus_t;
 
 uint8_t Servo_IsOutputActive(void);

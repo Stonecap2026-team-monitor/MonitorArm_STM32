@@ -10,6 +10,7 @@
 #include "cmsis_os.h"
 #include "tim.h"
 #include "communicationTask.h"
+#include "stepper.h"
 
 #define SERVO_MIN_ANGLE_DEG      (-135.0f)
 #define SERVO_MAX_ANGLE_DEG      135.0f
@@ -220,6 +221,7 @@ ServoStatus_t Servo_MoveSmoothMonitored(float theta2_deg, float theta3_deg,
 
     if (servoOutputActive == 0U)
     {
+        if (stepperAngleLimitHit != 0U) return SERVO_ERROR_ANGLE_LIMIT;
         if (keepMoving != 0 && !keepMoving()) return SERVO_ERROR_MONITOR;
         if (motorEstopRequest != 0U ||
             HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET)
@@ -236,6 +238,7 @@ ServoStatus_t Servo_MoveSmoothMonitored(float theta2_deg, float theta3_deg,
     while ((servoTheta2CurrentDeg != theta2_deg) ||
            (servoTheta3CurrentDeg != theta3_deg))
     {
+        if (stepperAngleLimitHit != 0U) return SERVO_ERROR_ANGLE_LIMIT;
         if (keepMoving != 0 && !keepMoving()) return SERVO_ERROR_MONITOR;
         /* ESTOP 최우선 */
         if (motorEstopRequest != 0U)
