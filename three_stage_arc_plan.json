@@ -1,0 +1,86 @@
+{
+  "description": "Three IK targets on the supplied face-centered arc. Motion BETWEEN targets is not guaranteed circular.",
+  "source": "C:\\Users\\kact0\\Downloads\\monitorarm_pc_test.zip",
+  "units": "cm and degrees",
+  "face_cm": [
+    81.96914856390217,
+    48.1611217283514
+  ],
+  "radius_cm": 39.99999999974498,
+  "start": [
+    20.0,
+    -90.0,
+    70.0
+  ],
+  "up": [
+    [
+      30.0,
+      -87.1,
+      48.8
+    ],
+    [
+      36.7,
+      -74.5,
+      21.1
+    ],
+    [
+      37.7,
+      -50.0,
+      -12.7
+    ]
+  ],
+  "down": [
+    [
+      36.7,
+      -74.5,
+      21.1
+    ],
+    [
+      30.0,
+      -87.1,
+      48.8
+    ],
+    [
+      20.0,
+      -90.0,
+      70.0
+    ]
+  ],
+  "target_checks": [
+    {
+      "arc_angle_deg": 8.333333333333334,
+      "angles_deg": [
+        30.0,
+        -87.1,
+        48.8
+      ],
+      "rounding_position_error_cm": 0.0011175413419729071,
+      "rounding_heading_error_deg": 0.03333333333335986
+    },
+    {
+      "arc_angle_deg": 16.666666666666668,
+      "angles_deg": [
+        36.7,
+        -74.5,
+        21.1
+      ],
+      "rounding_position_error_cm": 0.02646909674057639,
+      "rounding_heading_error_deg": 0.03333333333333144
+    },
+    {
+      "arc_angle_deg": 25.0,
+      "angles_deg": [
+        37.7,
+        -50.0,
+        -12.7
+      ],
+      "rounding_position_error_cm": 0.010213912907329831,
+      "rounding_heading_error_deg": 2.842170943040401e-14
+    }
+  ],
+  "limitations": [
+    "Reference model treats link3 direction as screen forward.",
+    "No camera/gaze control or top theta3 trim is performed by this test.",
+    "No collision guarantee between joint targets; axes are not time-synchronized."
+  ]
+}

@@ -38,7 +38,10 @@ void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
+  /* Diagnostic comparison: stay below the 88-100 kHz repeated-START
+   * timing limitation in STM32F446 ES0298 section 2.11.4.
+   * This does not establish that the board meets the erratum's rise-time conditions. */
+  hi2c1.Init.ClockSpeed = 50000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;

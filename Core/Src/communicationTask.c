@@ -53,6 +53,12 @@ static uint8_t Communication_CommandTypeToMsgId(uint8_t commandType)
 
         case MOTOR_COMMAND_JOG:
             return PROTOCOL_MSG_JOG;
+        case MOTOR_COMMAND_THETA1_TEST:
+            return PROTOCOL_MSG_THETA1_TEST;
+        case MOTOR_COMMAND_MOVE_INTERMEDIATE:
+            return PROTOCOL_MSG_MOVE_INTERMEDIATE;
+        case MOTOR_COMMAND_MOVE_FINAL:
+            return PROTOCOL_MSG_MOVE_FINAL;
 
         case MOTOR_COMMAND_CLEAR_ERROR:
             return PROTOCOL_MSG_CLEAR_ERROR;
@@ -406,6 +412,46 @@ void StartCommunicationTask(void *argument)
 									break;
 								}
 
+                            case PROTOCOL_MSG_MOVE_INTERMEDIATE:
+                            case PROTOCOL_MSG_MOVE_FINAL:
+                            {
+                                if (communicationLost != 0U) {
+                                    Communication_SendError(MOTOR_ERROR_COMM_LOST);
+                                    break;
+                                }
+                                if (rxMessage.data_length != 6U) {
+                                    Communication_SendError(MOTOR_ERROR_INVALID_COMMAND);
+                                    break;
+                                }
+                                MotorCommand_t pathCommand = {0};
+                                pathCommand.type = rxMessage.msg_id == PROTOCOL_MSG_MOVE_FINAL ?
+                                    MOTOR_COMMAND_MOVE_FINAL : MOTOR_COMMAND_MOVE_INTERMEDIATE;
+                                pathCommand.theta1_x10 = Protocol_ReadInt16BigEndian(&rxMessage.data[0]);
+                                pathCommand.theta2_x10 = Protocol_ReadInt16BigEndian(&rxMessage.data[2]);
+                                pathCommand.theta3_x10 = Protocol_ReadInt16BigEndian(&rxMessage.data[4]);
+                                if (osMessageQueuePut(motorCommandQueueHandle, &pathCommand, 0U, 0U) == osOK)
+                                    Communication_SendAck(rxMessage.msg_id);
+                                else Communication_SendError(MOTOR_ERROR_QUEUE);
+                                break;
+                            }
+                            case PROTOCOL_MSG_THETA1_TEST:
+                            {
+                                if (communicationLost != 0U) {
+                                    Communication_SendError(MOTOR_ERROR_COMM_LOST);
+                                    break;
+                                }
+                                if (rxMessage.data_length != 2U) {
+                                    Communication_SendError(MOTOR_ERROR_INVALID_COMMAND);
+                                    break;
+                                }
+                                MotorCommand_t testCommand = {0};
+                                testCommand.type = MOTOR_COMMAND_THETA1_TEST;
+                                testCommand.delta_x10 = Protocol_ReadInt16BigEndian(rxMessage.data);
+                                if (osMessageQueuePut(motorCommandQueueHandle, &testCommand, 0U, 0U) == osOK)
+                                    Communication_SendAck(rxMessage.msg_id);
+                                else Communication_SendError(MOTOR_ERROR_QUEUE);
+                                break;
+                            }
 							case PROTOCOL_MSG_JOG:
 
 								if (communicationLost != 0U){

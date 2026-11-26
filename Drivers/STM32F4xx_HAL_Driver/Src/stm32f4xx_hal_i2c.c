@@ -6820,6 +6820,9 @@ static HAL_StatusTypeDef I2C_RequestMemoryWrite(I2C_HandleTypeDef *hi2c, uint16_
   * @param  Tickstart Tick start value
   * @retval HAL status
   */
+/* Local diagnostic: written only after START has already timed out. */
+volatile uint32_t debugI2CStartFailureStage = 0U;
+
 static HAL_StatusTypeDef I2C_RequestMemoryRead(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint32_t Timeout, uint32_t Tickstart)
 {
   /* Enable Acknowledge */
@@ -6834,6 +6837,8 @@ static HAL_StatusTypeDef I2C_RequestMemoryRead(I2C_HandleTypeDef *hi2c, uint16_t
     if (READ_BIT(hi2c->Instance->CR1, I2C_CR1_START) == I2C_CR1_START)
     {
       hi2c->ErrorCode = HAL_I2C_WRONG_START;
+      /* Diagnostic only: distinguish initial START from repeated START. */
+      if (hi2c->Instance == I2C1) debugI2CStartFailureStage = 1U;
     }
     return HAL_TIMEOUT;
   }
@@ -6908,6 +6913,8 @@ static HAL_StatusTypeDef I2C_RequestMemoryRead(I2C_HandleTypeDef *hi2c, uint16_t
     if (READ_BIT(hi2c->Instance->CR1, I2C_CR1_START) == I2C_CR1_START)
     {
       hi2c->ErrorCode = HAL_I2C_WRONG_START;
+      /* Diagnostic only: distinguish initial START from repeated START. */
+      if (hi2c->Instance == I2C1) debugI2CStartFailureStage = 2U;
     }
     return HAL_TIMEOUT;
   }

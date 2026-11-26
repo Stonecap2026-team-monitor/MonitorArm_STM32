@@ -1,0 +1,9 @@
+# Local build output (already tracked files require separate cleanup).
+/Debug/
+/Release/
+
+# Python bytecode and local measurement data.
+__pycache__/
+*.py[cod]
+/encoder_motion_*.csv
+/encoder_stationary_*.csv

@@ -1,6 +1,0 @@
-../Core/Src/servo.c:39:14:Servo_MoveToward	16	static
-../Core/Src/servo.c:64:10:Servo_AngleToPulse	24	static
-../Core/Src/servo.c:86:15:Servo_Init	16	static
-../Core/Src/servo.c:122:15:Servo_SetAngle	32	static
-../Core/Src/servo.c:184:15:Servo_MoveSmooth	32	static
-../Core/Src/servo.c:254:6:Servo_GetCurrentAngles	16	static

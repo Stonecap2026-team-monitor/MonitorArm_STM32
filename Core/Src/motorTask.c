@@ -20,7 +20,7 @@ extern osMessageQueueId_t motorStatusQueueHandle;
 
 
 #define THETA1_MIN_X10   (-450)
-#define THETA1_MAX_X10    900
+#define THETA1_MAX_X10    800
 
 #define THETA2_MIN_X10   (-1050)
 #define THETA2_MAX_X10   1050
@@ -28,19 +28,16 @@ extern osMessageQueueId_t motorStatusQueueHandle;
 #define THETA3_MIN_X10   (-1050)
 #define THETA3_MAX_X10   1050
 
-#define MOTOR_INIT_THETA2_DEG    0.0f
-#define MOTOR_INIT_THETA3_DEG    0.0f
+#define THETA1_POSITION_TOLERANCE_DEG       3.0f
+#define THETA1_MAX_CORRECTION_DEG          100.0f //최대 보정 각도
 
-#define THETA1_POSITION_TOLERANCE_DEG       0.4f //목포값
-#define THETA1_MAX_CORRECTION_DEG           5.0f //최대 보정 각도
-
-#define THETA1_SETTLING_TIME_MS             150U //노이즈 떄문에 모터 끄고 150ms기다린 다음 시작
+#define THETA1_SETTLING_TIME_MS             2000U //모터 정지 후 2초 대기
 #define THETA1_MAX_CORRECTION_COUNT 		3U
 
-#define THETA1_ENCODER_STABLE_SAMPLES       10U
-#define THETA1_ENCODER_STABLE_RANGE_DEG     0.3f
 #define THETA1_ENCODER_TIMEOUT_MS          4000U
 #define MOTOR_TASK_QUEUE_WAIT_MS    10U
+/* Conservative pulse-completion guard; independent of the 4 s sensor guard. */
+#define PATH_STEPPER_TIMEOUT_MS           120000U
 static float commandedTheta1Deg = 0.0f; // 마지막으로 명령한 theta1 목표각
 static float commandedTheta2Deg = 0.0f;
 static float commandedTheta3Deg = 0.0f;
@@ -50,10 +47,13 @@ static float homeTheta2Deg = 0.0f;
 static float homeTheta3Deg = 0.0f;
 
 static uint8_t homeValid = 0U;
+static uint8_t angleLimitRecoveryAllowed = 0U;
 static void Motor_ReportError(MotorError_t error);
 static void Motor_EnterSafeStop(MotorError_t error);
 static uint8_t Motor_HandleEstopRequest(void);
 static uint8_t Motor_HandleCommLostRequest(void);
+static uint8_t Motor_HandleAngleLimitRequest(void);
+static uint8_t Motor_FinishPathMove(float targetDeg, uint8_t finalMove);
 /* 디버깅용 변수 */
 volatile int16_t debugTheta1 = 0;
 volatile int16_t debugTheta2 = 0;
@@ -68,6 +68,16 @@ volatile uint8_t motorCommLostRequest = 0U;
 volatile uint8_t motorEstopRequest = 0U;
 
 volatile MotorState_t motorState = MOTOR_STATE_IDLE;
+
+/* Latest safe-stop cause; kept across CLEAR_ERROR for inspection. */
+volatile uint32_t debugMotorStopCount = 0U;
+volatile uint32_t debugMotorStopError = 0U;
+volatile uint32_t debugMotorStopTick = 0U;
+volatile uint32_t debugMotorStopEncoderReads = 0U;
+volatile uint32_t debugMotorStopEncoderStatus = 0U;
+volatile uint32_t debugMotorStopAverageReady = 0U;
+volatile uint32_t debugEncoderWaitTimeoutCount = 0U;
+volatile uint32_t debugEncoderWaitTimeoutTick = 0U;
 
 volatile StepperStatus_t debugStepperStatus = STEPPER_OK;
 volatile ServoStatus_t debugServo2Status = SERVO_OK;
@@ -97,20 +107,14 @@ static float Motor_AbsFloat(float value)
 }
 
 
-static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
+static MotorError_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
 {
     uint32_t startTick;
     uint32_t lastReadCount;
-    uint32_t stableCount = 0U;
-
-    float currentAngleDeg;
-    float minAngleDeg = 0.0f;
-    float maxAngleDeg = 0.0f;
-    float angleSum = 0.0f;
 
     if (stableAngleDeg == NULL)
     {
-        return 0U;
+        return MOTOR_ERROR_ENCODER;
     }
 
     startTick = osKernelGetTickCount();
@@ -119,75 +123,196 @@ static uint8_t Motor_GetStableTheta1Angle(float *stableAngleDeg)
     while ((osKernelGetTickCount() - startTick) <
            THETA1_ENCODER_TIMEOUT_MS)
     {
+        if ((motorEstopRequest != 0U) ||
+            (HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET))
+        {
+            return MOTOR_ERROR_ESTOP;
+        }
+
+        if ((motorCommLostRequest != 0U) || (communicationLost != 0U))
+        {
+            return MOTOR_ERROR_COMM_LOST;
+        }
+
+        if (stepperAngleLimitHit != 0U)
+        {
+            return MOTOR_ERROR_ANGLE_LIMIT;
+        }
+
         if (encoderReadCount != lastReadCount)
         {
             lastReadCount = encoderReadCount;
 
-            if (encoderStatus != AS5600_OK)
+            if ((encoderStatus == AS5600_OK) &&
+                (encoderMovingAverageReady != 0U))
             {
-                stableCount = 0U;
-                angleSum = 0.0f;
-                osDelay(1U);
-                continue;
-            }
-
-            currentAngleDeg = currentEncoderAngleDeg;
-
-            if (stableCount == 0U)
-            {
-                minAngleDeg = currentAngleDeg;
-                maxAngleDeg = currentAngleDeg;
-                angleSum = currentAngleDeg;
-                stableCount = 1U;
-            }
-            else
-            {
-                if (currentAngleDeg < minAngleDeg)
-                {
-                    minAngleDeg = currentAngleDeg;
-                }
-
-                if (currentAngleDeg > maxAngleDeg)
-                {
-                    maxAngleDeg = currentAngleDeg;
-                }
-
-                if ((maxAngleDeg - minAngleDeg) >
-                    THETA1_ENCODER_STABLE_RANGE_DEG)
-                {
-                    // 진동이 크면 측정 구간 초기화
-                    minAngleDeg = currentAngleDeg;
-                    maxAngleDeg = currentAngleDeg;
-                    angleSum = currentAngleDeg;
-                    stableCount = 1U;
-                }
-                else
-                {
-                    angleSum += currentAngleDeg;
-                    stableCount++;
-
-                    if (stableCount >=
-                        THETA1_ENCODER_STABLE_SAMPLES)
-                    {
-                        *stableAngleDeg =
-                            angleSum / (float)stableCount;
-
-                        return 1U;
-                    }
-                }
+                *stableAngleDeg = filteredEncoderAngleDeg;
+                return MOTOR_ERROR_NONE;
             }
         }
 
         osDelay(1U);
     }
 
+    debugEncoderWaitTimeoutTick = HAL_GetTick();
+    debugEncoderWaitTimeoutCount++;
+    return MOTOR_ERROR_ENCODER;
+}
+
+
+/* Encoder feedback for coordinated moves. */
+volatile uint32_t debugPathPhase = 0U; /* 1: axes, 2: settling, 3: sample, 4: correction, 5: done, 6: failed */
+volatile uint32_t debugPathSettlingTick = 0U;
+volatile uint32_t debugPathSampleTick = 0U;
+
+static uint8_t Motor_PathHealthy(void)
+{
+    if ((motorEstopRequest != 0U) ||
+        HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET) {
+        motorEstopRequest = 0U;
+        Motor_EnterSafeStop(MOTOR_ERROR_ESTOP);
+        return 0U;
+    }
+    if (motorCommLostRequest != 0U || communicationLost != 0U) {
+        motorCommLostRequest = 0U;
+        Motor_EnterSafeStop(MOTOR_ERROR_COMM_LOST);
+        return 0U;
+    }
+    if (Motor_HandleAngleLimitRequest()) return 0U;
+    return 1U;
+}
+
+/* One freshness clock for the entire new command, including servo motion,
+ * stepper completion, settling and correction. Do not restart it per phase. */
+static uint32_t pathReadCount;
+static uint32_t pathFreshTick;
+static float pathMoveStartDeg;
+static float pathMoveDeltaDeg;
+volatile uint32_t debugPathFeedbackFault = 0U; /* 1: opposite motion, 2: correction did not reduce error */
+static uint8_t Motor_PathMonitor(void)
+{
+    if (!Motor_PathHealthy()) return 0U;
+    if (encoderReadCount != pathReadCount) {
+        pathReadCount = encoderReadCount;
+        pathFreshTick = osKernelGetTickCount();
+    }
+    if (osKernelGetTickCount() - pathFreshTick >= THETA1_ENCODER_TIMEOUT_MS) {
+        Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+        return 0U;
+    }
+    /* A successful I2C read does not prove that feedback follows the motor.
+     * Stop rather than feeding a reversed measurement back into more motion. */
+    if (Stepper_IsBusy() && encoderStatus == AS5600_OK && encoderMovingAverageReady) {
+        float change = filteredEncoderAngleDeg - pathMoveStartDeg;
+        if ((pathMoveDeltaDeg > 0.0f && change < -THETA1_POSITION_TOLERANCE_DEG) ||
+            (pathMoveDeltaDeg < 0.0f && change > THETA1_POSITION_TOLERANCE_DEG)) {
+            debugPathFeedbackFault = 1U;
+            Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static uint8_t Motor_PathWait(uint32_t delayMs)
+{
+    uint32_t start = osKernelGetTickCount();
+    do {
+        uint32_t now = osKernelGetTickCount();
+        if (!Motor_PathMonitor()) return 0U;
+        if (Stepper_IsBusy() && now - start >= PATH_STEPPER_TIMEOUT_MS) {
+            Motor_EnterSafeStop(MOTOR_ERROR_STEPPER);
+            return 0U;
+        }
+        if (!Stepper_IsBusy() && now - start >= delayMs) return 1U;
+        osDelay(1U);
+    } while (1);
+}
+
+static uint8_t Motor_PathFreshAngle(float *angle)
+{
+    uint32_t start = osKernelGetTickCount();
+    uint32_t firstRead = encoderReadCount;
+    while (osKernelGetTickCount() - start < THETA1_ENCODER_TIMEOUT_MS) {
+        if (!Motor_PathMonitor()) return 0U;
+        /* All three filtered samples must have arrived after this call.
+         * Failed reads reset encoderMovingAverageReady in EncoderTask. */
+        if ((uint32_t)(encoderReadCount - firstRead) >= 3U &&
+            encoderStatus == AS5600_OK && encoderMovingAverageReady != 0U) {
+            *angle = filteredEncoderAngleDeg;
+            debugPathSampleTick = HAL_GetTick();
+            return 1U;
+        }
+        osDelay(1U);
+    }
+    debugEncoderWaitTimeoutTick = HAL_GetTick();
+    debugEncoderWaitTimeoutCount++;
+    Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
     return 0U;
 }
 
+static uint8_t Motor_FinishPathMove(float targetDeg, uint8_t finalMove)
+{
+    float measured;
+    float previousCorrectionError = 0.0f;
+    if (!Motor_PathWait(0U)) goto failed;
+    /* Servo_MoveSmooth already returned; now the stepper has also stopped. */
+    if (!finalMove) {
+        /* Freshness check only, no settling delay and no correction. */
+        if (!Motor_PathFreshAngle(&measured)) goto failed;
+        debugStableTheta1AfterMoveDeg = measured;
+        debugTheta1PositionErrorDeg = targetDeg - measured;
+        debugPathPhase = 5U;
+        return 1U;
+    }
+    for (;;) {
+        Stepper_Disable();
+        debugPathPhase = 2U;
+        debugPathSettlingTick = HAL_GetTick();
+        if (!Motor_PathWait(THETA1_SETTLING_TIME_MS)) goto failed;
+        debugPathPhase = 3U;
+        if (!Motor_PathFreshAngle(&measured)) goto failed;
+        debugStableTheta1AfterMoveDeg = measured;
+        debugTheta1PositionErrorDeg = targetDeg - measured;
+        if (Motor_AbsFloat(debugTheta1PositionErrorDeg) < THETA1_POSITION_TOLERANCE_DEG) {
+            debugTheta1WithinTolerance = 1U;
+            debugPathPhase = 5U;
+            return 1U;
+        }
+        if (debugTheta1CorrectionCount > 0U &&
+            Motor_AbsFloat(debugTheta1PositionErrorDeg) >= previousCorrectionError) {
+            debugPathFeedbackFault = 2U;
+            Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+            goto failed;
+        }
+        if (debugTheta1CorrectionCount >= THETA1_MAX_CORRECTION_COUNT ||
+            Motor_AbsFloat(debugTheta1PositionErrorDeg) > THETA1_MAX_CORRECTION_DEG) {
+            Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+            goto failed;
+        }
+        debugPathPhase = 4U;
+        debugStepperMoveAngleDeg = debugTheta1PositionErrorDeg;
+        previousCorrectionError = Motor_AbsFloat(debugTheta1PositionErrorDeg);
+        pathMoveStartDeg = measured;
+        pathMoveDeltaDeg = debugStepperMoveAngleDeg;
+        debugStepperStatus = Stepper_MoveRelative(debugStepperMoveAngleDeg);
+        if (debugStepperStatus != STEPPER_OK) {
+            Motor_EnterSafeStop(debugStepperStatus == STEPPER_ERROR_ESTOP ? MOTOR_ERROR_ESTOP : MOTOR_ERROR_STEPPER);
+            goto failed;
+        }
+        debugTheta1CorrectionCount++;
+        motorState = MOTOR_STATE_MOVING;
+        if (!Motor_PathWait(0U)) goto failed;
+    }
+failed:
+    debugPathPhase = 6U;
+    return 0U;
+}
 
 static uint8_t Motor_CorrectTheta1Position(float targetDeg)
 {
     float stableTheta1Deg;
+    MotorError_t encoderResult;
     debugTheta1WithinTolerance = 0U;
     debugTheta1CorrectionCount = 0U;
 
@@ -195,6 +320,8 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
     {
         osDelay(1U);
     }
+
+    if (Motor_HandleAngleLimitRequest()) return 0U;
 
     if (Motor_HandleEstopRequest() != 0U)
     {
@@ -214,9 +341,10 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
     /*
      * 이동 후 안정된 실제 위치 측정
      */
-    if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+    encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+    if (encoderResult != MOTOR_ERROR_NONE)
     {
-    	Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+        Motor_EnterSafeStop(encoderResult);
         return 0U;
     }
 
@@ -299,6 +427,8 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
             osDelay(1U);
         }
 
+        if (Motor_HandleAngleLimitRequest()) return 0U;
+
         if (Motor_HandleEstopRequest() != 0U)
         {
             return 0U;
@@ -313,10 +443,10 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
 
         osDelay(THETA1_SETTLING_TIME_MS);
 
-        if (Motor_GetStableTheta1Angle(
-                &stableTheta1Deg) == 0U)
+        encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+        if (encoderResult != MOTOR_ERROR_NONE)
         {
-        	Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+            Motor_EnterSafeStop(encoderResult);
             return 0U;
         }
 
@@ -343,42 +473,6 @@ static uint8_t Motor_CorrectTheta1Position(float targetDeg)
     return 1U;
 }
 
-
-static uint8_t Motor_IsEncoderReady(void)
-{
-    if (encoderStatus != AS5600_OK)
-    {
-        return 0U;
-    }
-
-    return 1U;
-}
-
-static uint8_t Motor_Init(void)
-{
-    Stepper_Init();
-
-    if (Servo_Init() != SERVO_OK)
-    {
-        return 0U;
-    }
-
-    if (Servo_SetAngle(SERVO_CHANNEL_THETA2, MOTOR_INIT_THETA2_DEG) != SERVO_OK)
-    {
-        return 0U;
-    }
-
-    if (Servo_SetAngle(SERVO_CHANNEL_THETA3, MOTOR_INIT_THETA3_DEG) != SERVO_OK)
-    {
-        return 0U;
-    }
-
-    commandedTheta1Deg = currentEncoderAngleDeg;
-    commandedTheta2Deg = MOTOR_INIT_THETA2_DEG;
-    commandedTheta3Deg = MOTOR_INIT_THETA3_DEG;
-
-    return 1U;
-}
 
 static uint8_t Motor_IsAngleInRange(MotorAxis_t axis, float angleDeg)
 {
@@ -417,6 +511,32 @@ static void Motor_ReportError(MotorError_t error)
 static void Motor_EnterSafeStop(MotorError_t error)
 {
     MotorStatusMessage_t message;
+
+    /* A limit stop can surface through a stepper or servo return code.
+     * ESTOP and link failure retain priority and require CLEAR_ERROR. */
+    if (error == MOTOR_ERROR_ESTOP || motorEstopRequest != 0U ||
+        HAL_GPIO_ReadPin(ESTOP_GPIO_Port, ESTOP_Pin) == GPIO_PIN_RESET)
+        error = MOTOR_ERROR_ESTOP;
+    else if (error == MOTOR_ERROR_COMM_LOST || motorCommLostRequest != 0U || communicationLost != 0U)
+        error = MOTOR_ERROR_COMM_LOST;
+    else if (stepperAngleLimitHit != 0U)
+        error = MOTOR_ERROR_ANGLE_LIMIT;
+
+    stepperAngleLimitHit = 0U;
+    angleLimitRecoveryAllowed = (error == MOTOR_ERROR_ANGLE_LIMIT);
+    if (angleLimitRecoveryAllowed)
+    {
+        /* Require a new host request, never execute previously queued moves. */
+        (void)osMessageQueueReset(motorCommandQueueHandle);
+        Servo_GetCurrentAngles(&commandedTheta2Deg, &commandedTheta3Deg);
+    }
+
+    debugMotorStopError = (uint32_t)error;
+    debugMotorStopTick = HAL_GetTick();
+    debugMotorStopEncoderReads = encoderReadCount;
+    debugMotorStopEncoderStatus = (uint32_t)encoderStatus;
+    debugMotorStopAverageReady = encoderMovingAverageReady;
+    debugMotorStopCount++;
 
     /*
      * Theta1 즉시 안전 정지
@@ -459,6 +579,13 @@ static uint8_t Motor_HandleEstopRequest(void)
     return 1U;
 }
 
+static uint8_t Motor_HandleAngleLimitRequest(void)
+{
+    if (stepperAngleLimitHit == 0U) return 0U;
+    Motor_EnterSafeStop(MOTOR_ERROR_ANGLE_LIMIT);
+    return 1U;
+}
+
 static uint8_t Motor_HandleCommLostRequest(void)
 {
     if (motorCommLostRequest == 0U)
@@ -480,11 +607,14 @@ static void Motor_ReportCommandDone(uint8_t commandType)
 {
     MotorStatusMessage_t message;
 
+    if (Motor_HandleAngleLimitRequest()) return;
+
     message.status = MOTOR_STATUS_COMMAND_DONE;
     message.error = MOTOR_ERROR_NONE;
     message.command_type = commandType;
 
     if (osMessageQueuePut(motorStatusQueueHandle, &message, 0U, 0U) != osOK){
+        angleLimitRecoveryAllowed = 0U;
         motorState = MOTOR_STATE_ERROR;
     }
 }
@@ -513,6 +643,22 @@ static uint8_t Motor_CheckTarget(const MotorCommand_t *command)
 
     return 1U;
 }
+static uint8_t Motor_CheckAngleRecovery(float target, float measured)
+{
+    /* Reuse the measurement and target already validated by each command. */
+    if (!angleLimitRecoveryAllowed) return 1U;
+
+    if (!Motor_IsAngleInRange(MOTOR_AXIS_THETA1, target) || target >= measured)
+    {
+        Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
+        return 0U;
+    }
+
+    angleLimitRecoveryAllowed = 0U;
+    motorState = MOTOR_STATE_IDLE;
+    return 1U;
+}
+
 void Motor_GetCommandedAngles(float *theta1Deg,
                               float *theta2Deg,
                               float *theta3Deg)
@@ -543,14 +689,8 @@ void StartMotorTask(void *argument)
 
     motorState = MOTOR_STATE_INIT;
 
-    if (Motor_Init() == 0U)
-    {
-    	Motor_EnterSafeStop(MOTOR_ERROR_INIT);
-    }
-    else
-    {
-    	motorState = MOTOR_STATE_IDLE;
-    }
+    Stepper_Init();
+    motorState = MOTOR_STATE_IDLE;
 
     for (;;)
     {
@@ -585,6 +725,8 @@ void StartMotorTask(void *argument)
     	    continue;
     	}
 
+        if (Motor_HandleAngleLimitRequest()) continue;
+
     	if (queueStatus == osErrorTimeout)
     	{
     	    continue;
@@ -602,22 +744,32 @@ void StartMotorTask(void *argument)
         if ((motorState == MOTOR_STATE_ERROR) &&
             (command.type != MOTOR_COMMAND_CLEAR_ERROR))
         {
-            Motor_ReportError(MOTOR_ERROR_SYSTEM_LOCKED);
-            continue;
+            if (!angleLimitRecoveryAllowed)
+            {
+                Motor_ReportError(MOTOR_ERROR_SYSTEM_LOCKED);
+                continue;
+            }
+            if (command.type == MOTOR_COMMAND_SET_HOME ||
+                (command.type == MOTOR_COMMAND_JOG &&
+                 (command.axis != MOTOR_AXIS_THETA1 || command.delta_x10 >= 0)))
+            {
+                Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
+                continue;
+            }
         }
 
         switch(command.type){
 			case MOTOR_COMMAND_SET_TARGET:
+            case MOTOR_COMMAND_MOVE_INTERMEDIATE:
+            case MOTOR_COMMAND_MOVE_FINAL:
 			{
 				float stableTheta1Deg;
 				ServoStatus_t servoSmoothStatus;
-				if (Motor_IsEncoderReady() == 0U){
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-				    break;
-				}
+				MotorError_t encoderResult;
 
 				if(Motor_CheckTarget(&command) == 0U){
-					Motor_ReportError(MOTOR_ERROR_INVALID_TARGET);
+					Motor_ReportError(angleLimitRecoveryAllowed ?
+                        MOTOR_ERROR_ANGLE_LIMIT : MOTOR_ERROR_INVALID_TARGET);
 					break;
 				}
 
@@ -636,13 +788,26 @@ void StartMotorTask(void *argument)
 				theta1Deg = (float)command.theta1_x10 / 10.0f;
 
 				//제거
-				if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+				if (encoderResult != MOTOR_ERROR_NONE)
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_EnterSafeStop(encoderResult);
 					break;
 				}
 
 				debugStableTheta1Deg = stableTheta1Deg;
+                if (!Motor_CheckAngleRecovery(theta1Deg, stableTheta1Deg)) break;
+                if (command.type != MOTOR_COMMAND_SET_TARGET) {
+                    pathReadCount = encoderReadCount;
+                    pathFreshTick = osKernelGetTickCount();
+                    debugPathPhase = 1U;
+                    debugTheta1CorrectionCount = 0U;
+                    debugTheta1WithinTolerance = 0U;
+                    debugPathFeedbackFault = 0U;
+                    pathMoveStartDeg = stableTheta1Deg;
+                    pathMoveDeltaDeg = theta1Deg - stableTheta1Deg;
+                }
+
 				//제거
 
 				theta1MoveDeg = theta1Deg - stableTheta1Deg;
@@ -677,8 +842,16 @@ void StartMotorTask(void *argument)
 					debugStepperStatus = STEPPER_OK;
 				}
 
-				servoSmoothStatus =
-				    Servo_MoveSmooth(theta2Deg, theta3Deg);
+                if (command.type == MOTOR_COMMAND_SET_TARGET) {
+                    servoSmoothStatus = Servo_MoveSmooth(theta2Deg, theta3Deg);
+                } else {
+                    motorState = MOTOR_STATE_MOVING;
+                    servoSmoothStatus = Servo_MoveSmoothMonitored(theta2Deg, theta3Deg, Motor_PathMonitor);
+                    if (servoSmoothStatus == SERVO_ERROR_MONITOR) {
+                        debugPathPhase = 6U;
+                        break; /* Monitor already reported the precise failure. */
+                    }
+                }
 
 				if (servoSmoothStatus == SERVO_ERROR_ESTOP)
 				{
@@ -716,7 +889,9 @@ void StartMotorTask(void *argument)
 				commandedTheta2Deg = theta2Deg;
 				commandedTheta3Deg = theta3Deg;
 
-				if (Motor_CorrectTheta1Position(theta1Deg) == 0U)
+				if ((command.type == MOTOR_COMMAND_SET_TARGET ?
+                    Motor_CorrectTheta1Position(theta1Deg) :
+                    Motor_FinishPathMove(theta1Deg, command.type == MOTOR_COMMAND_MOVE_FINAL)) == 0U)
 				{
 				    break;
 				}
@@ -732,16 +907,24 @@ void StartMotorTask(void *argument)
 			case MOTOR_COMMAND_SET_HOME:
 			{
 				float stableTheta1Deg;
+				MotorError_t encoderResult;
 
-				if (Motor_IsEncoderReady() == 0U)
+				if (!Servo_IsOutputActive())
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_ReportError(MOTOR_ERROR_INIT);
 					break;
 				}
 
-				if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+				if (encoderResult != MOTOR_ERROR_NONE)
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_EnterSafeStop(encoderResult);
+					break;
+				}
+
+				if (!Motor_IsAngleInRange(MOTOR_AXIS_THETA1, stableTheta1Deg))
+				{
+					Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
 					break;
 				}
 
@@ -763,18 +946,19 @@ void StartMotorTask(void *argument)
 				float stableTheta1Deg;
 				float theta1MoveDeg;
 				ServoStatus_t servoSmoothStatus;
-
-				if (Motor_IsEncoderReady() == 0U)
-				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-					break;
-				}
+				MotorError_t encoderResult;
 
 				if (homeValid == 0U)
 				{
 					Motor_ReportError(MOTOR_ERROR_HOME_NOT_SET);
 					break;
 				}
+
+                if (!Motor_IsAngleInRange(MOTOR_AXIS_THETA1, homeTheta1Deg))
+                {
+                    Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
+                    break;
+                }
 
 				if (Stepper_IsBusy() != 0U)
 				{
@@ -784,13 +968,16 @@ void StartMotorTask(void *argument)
 				}
 
 				/* 이동 전 안정된 실제 Theta1 측정 */
-				if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+				encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+				if (encoderResult != MOTOR_ERROR_NONE)
 				{
-					Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+					Motor_EnterSafeStop(encoderResult);
 					break;
 				}
 
 				debugStableTheta1Deg = stableTheta1Deg;
+
+                if (!Motor_CheckAngleRecovery(homeTheta1Deg, stableTheta1Deg)) break;
 
 				theta1MoveDeg =
 					homeTheta1Deg - stableTheta1Deg;
@@ -881,6 +1068,67 @@ void StartMotorTask(void *argument)
 				break;
 			}
 
+            case MOTOR_COMMAND_THETA1_TEST:
+            {
+                float before, after;
+                MotorError_t encoderResult;
+                float delta = command.delta_x10 / 10.0f;
+                if (delta == 0.0f || Motor_AbsFloat(delta) > 10.0f) {
+                    Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
+                    break;
+                }
+                encoderResult = Motor_GetStableTheta1Angle(&before);
+                if (encoderResult != MOTOR_ERROR_NONE) {
+                    Motor_EnterSafeStop(encoderResult);
+                    break;
+                }
+                if (!Motor_IsAngleInRange(MOTOR_AXIS_THETA1, before + delta)) {
+                    Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
+                    break;
+                }
+                if (!Motor_CheckAngleRecovery(before + delta, before)) break;
+                debugStableTheta1Deg = before;
+                debugStepperMoveAngleDeg = delta;
+                debugTheta1CorrectionCount = 0U;
+                debugTheta1WithinTolerance = 0U;
+                debugStepperStatus = Stepper_MoveRelative(delta);
+                if (debugStepperStatus != STEPPER_OK) {
+                    Motor_EnterSafeStop(debugStepperStatus == STEPPER_ERROR_ESTOP ? MOTOR_ERROR_ESTOP : MOTOR_ERROR_STEPPER);
+                    break;
+                }
+                motorState = MOTOR_STATE_MOVING;
+                uint32_t started = osKernelGetTickCount();
+                uint32_t lastRead = encoderReadCount;
+                uint32_t lastValid = started;
+                uint8_t failed = 0U;
+                while (Stepper_IsBusy()) {
+                    if (Motor_HandleEstopRequest() || Motor_HandleCommLostRequest()) { failed = 1U; break; }
+                    uint32_t now = osKernelGetTickCount();
+                    if (encoderReadCount != lastRead) {
+                        lastRead = encoderReadCount;
+                        if (encoderStatus == AS5600_OK) lastValid = now;
+                    }
+                    if (now - lastValid >= THETA1_ENCODER_TIMEOUT_MS || now - started > 15000U) {
+                        Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+                        failed = 1U;
+                        break;
+                    }
+                    osDelay(1U);
+                }
+                if (failed || Motor_HandleEstopRequest() || Motor_HandleCommLostRequest()) break;
+                encoderResult = Motor_GetStableTheta1Angle(&after);
+                if (encoderResult != MOTOR_ERROR_NONE) {
+                    Motor_EnterSafeStop(encoderResult);
+                    break;
+                }
+                debugStableTheta1AfterMoveDeg = after;
+                debugTheta1PositionErrorDeg = before + delta - after;
+                commandedTheta1Deg = before + delta;
+                motorState = MOTOR_STATE_IDLE;
+                /* Completion means pulses ended; do not correct the measured error. */
+                Motor_ReportCommandDone((uint8_t)command.type);
+                break;
+            }
 			case MOTOR_COMMAND_JOG:
 			{
 				float deltaDeg;
@@ -895,17 +1143,19 @@ void StartMotorTask(void *argument)
 				        break;
 				}
 
+				if ((command.axis == MOTOR_AXIS_THETA2 || command.axis == MOTOR_AXIS_THETA3) &&
+				    !Servo_IsOutputActive())
+				{
+					Motor_ReportError(MOTOR_ERROR_INIT);
+					break;
+				}
+
 				switch (command.axis){
 					case MOTOR_AXIS_THETA1:
 					{
 						float stableTheta1Deg;
 						float theta1MoveDeg;
-
-						if (Motor_IsEncoderReady() == 0U)
-						{
-							Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
-							break;
-						}
+						MotorError_t encoderResult;
 
 						if (Stepper_IsBusy() != 0U)
 						{
@@ -918,10 +1168,10 @@ void StartMotorTask(void *argument)
 						 * JOG 기준 위치도 단일 측정값이 아니라
 						 * 안정된 실제 위치를 사용
 						 */
-						if (Motor_GetStableTheta1Angle(
-								&stableTheta1Deg) == 0U)
+						encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+						if (encoderResult != MOTOR_ERROR_NONE)
 						{
-							Motor_EnterSafeStop(MOTOR_ERROR_ENCODER);
+							Motor_EnterSafeStop(encoderResult);
 							break;
 						}
 
@@ -941,6 +1191,8 @@ void StartMotorTask(void *argument)
 							Motor_ReportError(MOTOR_ERROR_ANGLE_LIMIT);
 							break;
 						}
+
+                        if (!Motor_CheckAngleRecovery(targetDeg, stableTheta1Deg)) break;
 
 						theta1MoveDeg =
 							targetDeg - stableTheta1Deg;
@@ -1099,6 +1351,7 @@ void StartMotorTask(void *argument)
 				float stableTheta1Deg;
 				float currentTheta2Deg;
 				float currentTheta3Deg;
+				MotorError_t encoderResult;
 			    /*
 			     * ESTOP 버튼이 아직 눌려 있으면
 			     * ERROR 해제 금지
@@ -1123,12 +1376,6 @@ void StartMotorTask(void *argument)
 			        break;
 			    }
 
-			    if (Motor_IsEncoderReady() == 0U)
-			    {
-			        Motor_ReportError(MOTOR_ERROR_ENCODER);
-			        break;
-			    }
-
 			    if (Stepper_IsBusy() != 0U)
 			    {
 			        Motor_ReportError(MOTOR_ERROR_STEPPER_BUSY);
@@ -1137,9 +1384,10 @@ void StartMotorTask(void *argument)
 
 			    Stepper_EmergencyStop();
 
-			    if (Motor_GetStableTheta1Angle(&stableTheta1Deg) == 0U)
+			    encoderResult = Motor_GetStableTheta1Angle(&stableTheta1Deg);
+			    if (encoderResult != MOTOR_ERROR_NONE)
 			    {
-			        Motor_ReportError(MOTOR_ERROR_ENCODER);
+			        Motor_ReportError(encoderResult);
 			        break;
 			    }
 
@@ -1152,6 +1400,7 @@ void StartMotorTask(void *argument)
 			    commandedTheta2Deg = currentTheta2Deg;
 			    commandedTheta3Deg = currentTheta3Deg;
 
+			    angleLimitRecoveryAllowed = 0U;
 			    motorState = MOTOR_STATE_IDLE;
 
 			    Motor_ReportCommandDone(

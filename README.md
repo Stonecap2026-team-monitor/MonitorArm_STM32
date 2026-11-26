@@ -1,794 +1,145 @@
-# Smart Monitor Arm STM32 Firmware
+﻿# Smart Monitor Arm — STM32 펌웨어
 
-> Jetson과 STM32 간 UART 커스텀 프로토콜 및 FreeRTOS 기반 제어 구조를 적용한 스마트 모니터 암 STM32 펌웨어  
-> Capstone Design Project · In Progress
+2026-11-25 코드 기준이다. Jetson 연동 규격은 [JETSON_STM32_HANDOFF.txt](JETSON_STM32_HANDOFF.txt)를 참고한다.
 
----
+## 현재 상태
 
-## Development Status
+STM 전원 재연결 후 이동 명령을 보내기 전까지 세 축이 대기하는 것을 확인했다. 기본 관절 시험에서는 상승·하강 각 3구간을 완료했다.
 
-본 저장소는 **2026년 8월 6일 기준으로 개발 중인 캡스톤 프로젝트의 STM32 Firmware Snapshot**입니다.
+위 실기 기록은 이전 시험 결과이다. 현재 Python의 단계별 `prepare`는 자동 테스트로 검증했으며, 이 문서에서 실제 기구 검증 완료를 의미하지 않는다.
 
-전체 스마트 모니터 암 시스템은 아직 개발 중이지만, 포트폴리오에 작성한 다음 통신 기능은 코드 구현과 기본 검증을 완료했습니다.
+현재 시험 구성은 엔코더 자석 한 개이며, 사용자가 해당 구성의 동작을 확인했다. 영점은 기존 261.29°로 복원했다. 자력 확인용 임시 코드와 `debugAS5600Magnet`은 제거했다.
 
-### 구현 및 기본 검증 완료
+재연결 시험의 첫 `prepare`에서는 θ1 측정값이 순간적으로 튀면서 엔코더 오류(`0x0D`)가 보고되었다. 오류 해제 후 재시도는 완료되었다. 원호 시험 전에는 θ1 엔코더 자석 고정, 측정 방향, 영점 및 반복 측정의 일관성을 확인한다. `AS5600_OK`는 센서 통신이 성공했음을 뜻한다.
 
-- Jetson–STM32 UART 커스텀 Frame 설계
-- 가변 길이 데이터 송수신 구조
-- 상태 머신 기반 Byte 단위 수신 Parser
-- START / END Byte 검증
-- XOR Checksum 생성 및 검증
-- Heartbeat 수신 및 ACK 응답
-- 비정상 DATA LENGTH 검출
-- 불완전한 Frame 수신 Timeout 복구
-- 잘못된 Frame 이후 정상 Frame 재수신
-- Big-Endian 기반 목표 각도 데이터 변환
-- FreeRTOS Queue 기반 Communication Task–Motor Task 연동
-- 현재 엔코더 각도 주기 송신
-- Motor 동작 완료 및 오류 상태 송신
-- Python 기반 PC–STM32 UART 통신 테스트
+### 부팅과 재연결
 
-### 현재 개발 중
+STM은 부팅이나 리셋 직후 스텝 펄스와 서보 PWM을 출력하지 않고 이동 명령을 기다린다. Jetson은 재연결 시 기존 heartbeat(`0x01`)로 통신을 시작하고, `READY`(`0x86`)를 받아도 이동 명령은 작업자 요청까지 보류한다. 통신 오류가 잠긴 경우 원인을 확인한 뒤 `CLEAR_ERROR`(`0x14`) 완료를 기다린다.
 
-- Jetson 영상 처리 프로그램과 STM32의 실제 통합
-- 전체 모터 제어부와의 통합 검증
-- 통신 단절 시 모터 안전 정지
-- SET_HOME 및 MOVE_HOME 기능 연동
-- ACK Timeout 및 재전송 처리
-- 전체 하드웨어 장시간 동작 시험
+첫 세 축 절대 이동에서 서보 PWM을 요청받은 목표각으로 시작한다. 서보에 실제 위치 피드백이 없어 첫 목표까지의 물리적 움직임은 서보 자체 동작에 따른다. 서보 조그와 `SET_HOME`은 첫 절대 이동을 완료한 후 사용한다.
 
----
+## STM이 하는 일
 
-## Project Overview
+Jetson 또는 PC가 목표 관절각을 보내면 STM이 각도 제한 검사, 스텝모터 가감속, 서보 이동, θ1 엔코더 보정, 완료/오류 보고를 맡는다. 얼굴 검출, 역기구학, 응시 판단은 STM에 구현되어 있지 않다.
 
-본 프로젝트는 카메라를 통해 사용자의 자세를 분석하고, 사용자에게 적합한 위치로 모니터 암을 자동 조절하는 시스템입니다.
+수신 및 실행 흐름:
 
-Jetson은 영상 분석 결과를 바탕으로 모터의 목표 각도를 계산하여 STM32로 전달합니다. STM32는 수신한 목표값에 따라 모터를 제어하고, 현재 각도와 동작 완료 및 오류 상태를 Jetson으로 회신합니다.
+1. `uart_dma.c`가 UART 수신 데이터를 전달하고 `protocol.c`가 프레임을 해석한다.
+2. `communicationTask.c`가 명령을 모터 큐에 넣으면 ACK를 보낸다. ACK는 이동 성공이나 도착을 의미하지 않는다. 이후 모터 검사에서 거절될 수도 있다.
+3. `motorTask.c`가 목표와 상태를 검사하고 현재 θ1 측정값에서 목표까지의 이동량을 계산한다.
+4. `stepper.c`가 θ1 펄스를 발생시킨다. `servo.c`는 첫 이동에서 θ2·θ3 목표를 출력하고 후속 이동에서 목표를 점진적으로 갱신한다. 세 축의 정확한 동시 도착은 보장하지 않는다.
+5. 명령 종류에 따라 θ1 측정/보정을 마친 뒤 모터 상태 큐로 결과를 전달한다.
+6. 통신 태스크가 `0x82 + 완료한 명령 ID` 또는 `0x83 + 오류 코드`를 전송한다.
 
-Jetson과 STM32 사이에서 명령과 상태 데이터를 구분하고 통신 오류를 검출하기 위해 UART 기반 커스텀 프로토콜을 설계했습니다.
+### 세 번 나눠 움직이는 방식
 
-고정 길이 데이터만 수신하는 방식이 아니라 메시지 종류에 따라 DATA 길이를 변경할 수 있도록 가변 길이 Frame을 정의했습니다. 또한 Checksum, Heartbeat, ACK 및 Timeout 처리를 적용하여 비정상 Frame을 검출하고 다음 정상 Frame을 다시 수신할 수 있도록 구성했습니다.
+상승과 하강 각각 목표 관절각 세 세트를 사용한다. PC/Jetson이 한 세트씩 보내고 완료를 기다린다. 세 번이라는 횟수는 현재 Python/JSON의 규칙이며, STM은 전체 횟수를 저장하거나 세 번째 명령인지 판별하지 않는다. 보정 여부는 받은 명령이 0x1A인지 0x1B인지로 결정한다.
 
----
+| 순서 | 명령 | STM 처리 | 다음 명령 조건 |
+|---|---|---|---|
+| 첫 번째 이동 | `0x1A MOVE_INTERMEDIATE` | 세 축 구동 완료 후 새 θ1 샘플 확인, 목표 오차 보정 없음 | `0x82`의 DATA가 `0x1A` |
+| 두 번째 이동 | `0x1A MOVE_INTERMEDIATE` | 첫 번째와 동일 | `0x82`의 DATA가 `0x1A` |
+| 세 번째 이동 | `0x1B MOVE_FINAL` | 세 축 구동 완료 → 2초 대기 → 새 θ1 측정 → 필요하면 보정 | `0x82`의 DATA가 `0x1B` |
 
-## My Role
+각 이동에는 기존 STM 가감속을 적용하므로 중간에도 감속·정지가 있다. 다음 구간의 θ1 이동량은 해당 구간 목표에서 새 엔코더 측정값을 뺀 값이다. 목표 세트 자체가 원호 위에 있어도 목표 사이의 실제 궤적이 원호라는 보장은 없다.
 
-본 프로젝트에서 **STM32 MCU 펌웨어 전체 개발**을 담당하고 있습니다.
+`0x1B`는 목표 θ1과 측정 θ1의 차이가 **3° 이상**이면 보정한다. 보정 후에도 2초 기다린 뒤 다시 측정하며 최대 세 번 보정한다. 보정 직전 오차가 100°를 초과하면 보정하지 않고 오류로 끝난다. 이 100°는 코드의 이상 오차 차단값이며 권장 이동량이 아니다. 허용 범위에 들지 못하거나 측정/보호 조건이 실패해도 오류로 끝난다. 중간 두 이동에는 이 2초 대기와 목표 오차 보정이 없다.
 
-통신 부분에서는 다음 기능을 직접 설계하고 구현했습니다.
+현재 안정화 처리는 고정 2초 대기와 새 샘플 확인이다. 이전에 논의한 ‘최대·최소 폭 변화 0.4°/0.5초’ 또는 ‘최근 10개 중앙값’ 방식은 적용되어 있지 않다. 기존 `0x10 SET_TARGET` 등은 자체 보정 절차를 유지하며 기존 보정 기준은 3° 초과이다.
 
-- Jetson–STM32 통신 요구사항 정의
-- UART Custom Protocol Frame 설계
-- RX / TX Message ID 정의
-- Frame 생성 및 Decode 함수 구현
-- XOR Checksum 알고리즘 구현
-- 상태 머신 기반 가변 길이 수신 Parser 구현
-- Heartbeat 및 ACK 처리
-- Frame 수신 Timeout 및 Parser Reset 처리
-- Big-Endian 데이터 직렬화 및 역직렬화
-- Communication Task 설계
-- FreeRTOS Queue 기반 Motor Task 연동
-- ChatGPT를 활용한 PC–STM32 UART 통신 테스트 코드 구성 및 동작 검증
-- 오류 Frame 및 복구 동작 테스트
+### 모터 및 각도 기준
 
----
+- θ1: 기둥 가까운 축, 수평 0°, 위로 올라가면 양수. θ2·θ3는 앞 링크에서 일직선으로 이어지는 방향을 0°로 해석한다.
+- 목표 제한: θ1 −45~80°, θ2·θ3 −105~105°.
+- θ1은 기존 내부 가감속을 유지한다. 현재 설정은 출력축 1회전 64,000펄스, 시작 200펄스/초, 최대 1,000펄스/초, 가속도 1,000펄스/초²이다. 속도는 펄스 주기로 바꾸며 듀티는 약 50%이다.
+- 서보는 첫 절대 이동에서 요청 목표를 바로 출력하고, 이후 이동에서는 20ms마다 최대 0.4°씩 목표를 갱신한다. 별도 실제 위치 피드백은 없다. 따라서 ‘세 축 완료’는 θ1 구동 및 필요한 측정/보정과 서보 목표 갱신 완료를 뜻한다.
+- θ2 하드웨어 변환은 `-목표각 - 16°`, θ3는 `목표각 - 16°`이다. **θ2 반전은 장착 방향을 반영한 기존 처리이므로 Jetson에서 중복 반전하지 않는다.**
 
-## Development Environment
+이동 종료 시 스텝 드라이버는 비활성화된다. 상단 대기나 θ3 단독 조정에서 ‘θ1 유지’는 θ1에 추가 이동을 명령하지 않는다는 뜻이며, 지속적인 엔코더 위치 유지 제어는 없다. 실제 자세 유지 여부는 기구 조건에 달려 있다.
 
-| Item | Specification |
+θ1 상승 중 최신 엔코더 실측이 87° 이상이면 스텝 펄스를 중단하고 각도 제한 오류 `0x03`을 전송한다. 일반 이동·조그·보정에 공통 적용하며, 측정 갱신과 정지 지연에 따른 초과량이 생길 수 있다. 각도 초과로 정지한 경우에는 `r` 없이 새 하강 명령을 받을 수 있다. STM은 새 측정값보다 낮고 −45~80° 범위에 있는 θ1 목표만 복귀 명령으로 허용한다. 중단 당시 대기 큐의 명령은 폐기한다. 통신·엔코더·비상정지 오류는 별도의 오류 해제 조건을 따른다.
+
+### 엔코더와 오류 처리
+
+`encoderTask.c`는 AS5600을 주기적으로 읽는다. 현재 I2C1 속도는 50kHz, 정상 루프 지연은 20ms이다. 읽기 실패 시 실제 주기는 길어질 수 있다. 원시값을 360/4096으로 환산하고 코드에 설정된 영점 **261.29°**를 뺀 뒤 ±180° 범위로 정규화한다. 제어에는 3개 샘플 평균을 사용한다.
+
+연속 읽기 실패 시 SCL/SDA 버스 해제와 I2C 재초기화를 시도한다. 복구 횟수는 진단값이지 정상 동작의 증거가 아니다. 엔코더 통신 복구와 모터 오류 해제는 별개다.
+
+엔코더 새 값 대기 제한은 4초이며, `0x1A/0x1B`의 스텝 종료 대기 제한은 120초이다. 이동이 끝나면 바로 다음 처리로 넘어간다. PC 도구의 명령당 완료 제한은 180초이다.
+
+새 `0x1A/0x1B`에는 이동 중 반대 방향 측정 변화가 3°를 초과할 때 중단하는 보호와, 보정 후 오차가 허용 범위 밖에서 줄지 않을 때 추가 보정을 금지하는 보호가 있다. 기존 명령 전체에 이 보호가 적용된 것은 아니다.
+
+Heartbeat가 3초 동안 끊기면 통신 오류 처리를 한다. `q`나 Ctrl+C는 PC 프로그램을 종료한다. 이번 시험 구성에는 하드웨어 ESTOP이 연결되어 있지 않으며 STM 리셋 버튼은 모터 전원을 차단하지 않는다. 오류 해제 명령은 원인을 해결한 후 사용하며 자동 재시도하지 않는다.
+
+## 남아 있는 파일과 사용법
+
+| 파일 | 용도 |
 |---|---|
-| MCU | STM32F446RE |
-| IDE | STM32CubeIDE |
-| Configuration | STM32CubeMX |
-| RTOS | FreeRTOS / CMSIS-RTOS2 |
-| Language | C |
-| Communication | UART |
-| Baud Rate | 115200 bps |
-| Upper Controller | Jetson |
-| Current Test Device | Windows PC |
-| PC Test Language | Python |
-| Encoder | AS5600 |
-| Motor Interface | Stepper Motor / Servo Motor |
+| [three_stage_test.py](three_stage_test.py) | 현재 바이너리 프로토콜로 세 번 나눠 이동하는 PC 시험 도구. 패킷 처리와 heartbeat가 파일 안에 포함되어 있다. |
+| [three_stage_joint_test.json](three_stage_joint_test.json) | 기본 관절 이동 시험. 시작 (0, 0, 0), 최종 (60, −40, 30). 관절별 변화량을 3등분한 목표를 사용한다. |
+| [three_stage_arc_plan.json](three_stage_arc_plan.json) | 고정 얼굴 중심/반지름으로 미리 계산한 원호 목표. HOME (20,−90,70), 상승 최종 (37.7,−50,−12.7). 실시간 영상 계획이 아니다. |
+| [stepper_PC_Test.py](stepper_PC_Test.py) | 의도대로 멈추지 않아 긴급 정지했던 스텝모터를 수동으로 0° 쪽으로 되돌릴 때 쓰는 기존 도구. 아래 설명 참고. |
+| [JETSON_STM32_HANDOFF.txt](JETSON_STM32_HANDOFF.txt) | Jetson/서버 담당자에게 넘길 통신 및 순서 규격. |
+| `Core/Src`, `Core/Inc` | 실제 STM 동작 소스 및 헤더. |
+| `Debug/capstone.elf` | CubeIDE에서 빌드하면 로컬에 생성되는 펌웨어. `Debug/`는 Git 추적에서 제외되어 있으며, 보드 적용에는 빌드 후 업로드가 필요하다. |
+| `_checkpoint_backup_20261123_234436/` | 로컬에 보관한 이전 상태 백업. |
 
----
+### 세 단계 시험 도구
 
-### Command Flow
+포트를 열기 전에 미리보기로 목표각을 확인할 수 있다.
 
-```text
-Jetson
-  → UART Custom Frame
-  → Communication Task
-  → Frame 검증 및 Data Decode
-  → motorCommandQueue
-  → Motor Task
+```powershell
+python three_stage_test.py --preview
+python three_stage_test.py --plan three_stage_arc_plan.json --preview
 ```
 
-### Status Flow
+기구 및 센서 각도 검증을 마친 뒤 실행할 명령:
 
-```text
-Motor Task
-  → motorStatusQueue
-  → Communication Task
-  → UART Custom Frame 생성
-  → Jetson
+```powershell
+python three_stage_test.py --port COM4
+# 원호 계획을 선택할 때
+python three_stage_test.py --port COM4 --plan three_stage_arc_plan.json
 ```
 
-현재 엔코더 각도는 Communication Task에서 주기적으로 확인한 후 `CURRENT_ANGLE` Frame으로 Jetson에 송신합니다.
+실행 환경에는 `pyserial`이 필요하다. 기본 계획의 상승 목표는 (20, −13.3, 10)°, (40, −26.7, 20)°, (60, −40, 30)°이다. 하강은 앞의 두 목표를 역순으로 거쳐 (0, 0, 0)°로 돌아온다. PC 프로그램을 시작하면 heartbeat를 보내며, 이동은 작업자가 `prepare`, `run`, `down` 중 하나를 입력할 때 시작한다.
 
----
-
-# UART Custom Protocol
-
-## Protocol Design
-
-Jetson과 STM32는 동일한 Frame 형식을 사용하여 데이터를 송수신합니다.
-
-```text
-+-------+--------+--------+----------+----------+------+
-| START | MSG_ID | LENGTH |   DATA   | CHECKSUM | END  |
-+-------+--------+--------+----------+----------+------+
-| 1Byte | 1Byte  | 1Byte  | N Bytes  | 1Byte    |1Byte |
-+-------+--------+--------+----------+----------+------+
-```
-
-| Field | Size | Description |
-|---|---:|---|
-| START | 1 Byte | Frame 시작 값 `0xAA` |
-| MSG_ID | 1 Byte | 명령 또는 상태 메시지 식별 |
-| LENGTH | 1 Byte | DATA 영역의 길이 |
-| DATA | N Bytes | 명령값 또는 상태값 |
-| CHECKSUM | 1 Byte | MSG_ID, LENGTH, DATA의 XOR 결과 |
-| END | 1 Byte | Frame 종료 값 `0x55` |
-
-START와 END Byte를 이용하여 Frame의 경계를 구분하고, LENGTH 값을 이용하여 가변 길이 DATA를 처리합니다.
-
-Checksum은 `MSG_ID`, `LENGTH`, `DATA`를 XOR 연산하여 계산합니다. 수신한 Checksum과 STM32에서 다시 계산한 값이 일치하지 않으면 해당 Frame을 비정상 데이터로 판단하여 폐기합니다.
-
-```text
-CHECKSUM = MSG_ID XOR LENGTH XOR DATA[0] XOR ... XOR DATA[N-1]
-```
-
-현재 최대 DATA 길이는 16 Byte로 제한했습니다.
-
-```c
-#define PROTOCOL_START_BYTE      0xAAU
-#define PROTOCOL_END_BYTE        0x55U
-#define PROTOCOL_MAX_DATA_LENGTH 16U
-#define PROTOCOL_OVERHEAD_LENGTH 5U
-```
-
----
-
-## Message IDs
-
-### Jetson → STM32
-
-| MSG_ID | Message | DATA | Current Status |
-|---:|---|---|---|
-| `0x01` | HEARTBEAT | Alive Counter, 1 Byte | 구현 및 기본 검증 완료 |
-| `0x10` | SET_TARGET | θ1, θ2, θ3, 총 6 Byte | 구현 및 Queue 연동 |
-| `0x11` | SET_HOME | Home θ1, θ2, θ3 | Message ID 정의 |
-| `0x12` | MOVE_HOME | DATA 없음 | Message ID 정의 |
-
-### STM32 → Jetson
-
-| MSG_ID | Message | DATA | Current Status |
-|---:|---|---|---|
-| `0x80` | ACK | 수신한 MSG_ID, 1 Byte | 구현 및 기본 검증 완료 |
-| `0x81` | STATUS | 시스템 상태 | Message ID 정의 |
-| `0x82` | MOVE_DONE | 현재 구현본은 DATA 없음 | 구현 |
-| `0x83` | ERROR | 현재 구현본은 DATA 없음 | 구현 |
-| `0x84` | CURRENT_ANGLE | 현재 각도 × 10, 2 Byte | 구현 |
-
-`SET_HOME`, `MOVE_HOME`, `STATUS`는 Protocol Message ID를 정의했으며 실제 시스템 기능과의 연동은 개발 중입니다.
-
-`MOVE_DONE`과 `ERROR`는 현재 DATA가 없는 상태 Frame으로 구현했으며, 향후 최종 각도와 세부 오류 코드를 DATA에 추가할 예정입니다.
-
----
-
-## Target Angle Data Format
-
-Jetson은 3개의 목표 각도를 각각 0.1도 단위의 Signed 16-bit 정수로 변환하여 전송합니다.
-
-```text
-θ1 : 2 Bytes
-θ2 : 2 Bytes
-θ3 : 2 Bytes
-
-Total DATA Length : 6 Bytes
-```
-
-예를 들어 목표 각도가 다음과 같을 경우,
-
-```text
-θ1 = 10.5°
-θ2 = -5.0°
-θ3 = 20.0°
-```
-
-전송되는 정수값은 다음과 같습니다.
-
-```text
-θ1_x10 = 105
-θ2_x10 = -50
-θ3_x10 = 200
-```
-
-각 데이터는 Big-Endian 형식으로 전송합니다.
-
-```text
-High Byte → Low Byte
-```
-
-STM32는 수신한 6 Byte DATA를 각각 `int16_t` 값으로 복원한 후 `motorCommandQueue`를 통해 Motor Task에 전달합니다.
-
-```text
-DATA[0], DATA[1] → θ1
-DATA[2], DATA[3] → θ2
-DATA[4], DATA[5] → θ3
-```
-
----
-
-## Current Angle Data Format
-
-STM32는 엔코더에서 측정한 각도를 0.1도 단위의 Signed 16-bit 정수로 변환하여 송신합니다.
-
-```text
-Actual Angle  : 35.7°
-Transmit Data : 357
-```
-
-현재 구현본에서는 1개의 현재 각도를 2 Byte Big-Endian 형식으로 송신합니다.
-
-```text
-CURRENT_ANGLE DATA Length : 2 Bytes
-```
-
-현재 각도는 200 ms 주기로 Jetson에 송신합니다.
-
-```c
-#define CURRENT_ANGLE_TX_PERIOD_MS 200U
-```
-
----
-
-# RX State Machine
-
-## Byte-by-Byte Parsing
-
-초기에는 Heartbeat Frame의 길이에 맞춰 UART 데이터를 6 Byte 고정 길이로 수신했습니다.
-
-하지만 Message마다 DATA 길이가 다르기 때문에 고정 길이 수신 방식으로는 `SET_TARGET`, `MOVE_HOME` 등 서로 다른 Frame을 처리하기 어려웠습니다.
-
-이를 해결하기 위해 UART 데이터를 1 Byte씩 수신하고, 각 Byte를 상태 머신 Parser에 전달하도록 구조를 변경했습니다.
-
-```text
-WAIT_START
-    ↓
-READ_MSG_ID
-    ↓
-READ_LENGTH
-    ↓
-READ_DATA
-    ↓
-READ_CHECKSUM
-    ↓
-READ_END
-    ↓
-FRAME_COMPLETE
-```
-
-### Parser States
-
-| State | Description |
+| 입력 | 동작 |
 |---|---|
-| `WAIT_START` | START Byte `0xAA` 대기 |
-| `READ_MSG_ID` | Message ID 저장 |
-| `READ_LENGTH` | DATA 길이 확인 |
-| `READ_DATA` | LENGTH만큼 DATA 저장 |
-| `READ_CHECKSUM` | 수신 Checksum 저장 |
-| `READ_END` | END Byte `0x55` 확인 |
+| `r` | 오류 해제 요청. 준비 전 상태로 돌아간다. 이동하지 않는다. |
+| `prepare` | 기본 start `(0,0,0)`용. 새 θ1 측정값을 목표로 보내며 θ2를 −50° → −30° → 0°로 이동(θ3=0°, 각 단계 `0x1A`). 마지막 DONE 후 3초 대기하고 `(0,0,0)`을 `0x1B`로 전송. **SET_HOME 저장 명령은 아니다.** |
+| `run` | JSON `up`의 세 목표를 순서대로 실행. 마지막 이동에서 보정한다. |
+| `down` | JSON `down`의 세 목표를 순서대로 실행하여 `start`로 복귀한다. |
+| `q` | 기록 저장 후 종료. heartbeat도 멈추므로 이후 STM에 통신 오류가 발생할 수 있다. |
 
-### Parsing Process
+`prepare`, `run`, `down`은 대기 상태에서 순서와 관계없이 선택하거나 반복한다. 각 명령의 완료 후 다음 명령을 입력한다. `run`과 `down`은 현재 자세에서 JSON의 첫 목표부터 세 목표를 차례로 방문하므로, 현재 각도에 따라 첫 이동 방향이 달라질 수 있다. 오류/완료 시간 초과 시 남은 명령 전송을 중단한다. `0x03` 수신 후에는 새 이동 명령을 입력할 수 있으며 STM이 복귀 조건을 검사한다. 그 외 오류와 시간 초과 후에는 원인 확인 및 `r` 완료 후 이동을 재개한다. PC의 완료 시간 초과 자체는 STM 정지 명령이 아니며, 프로그램이 실행 중이면 heartbeat도 계속 전송한다. 따라서 이미 실행 중인 이동이 멈췄다고 판단해서는 안 된다. 새 실행 기록은 `three_stage_날짜_시간.csv`에 저장된다.
 
-1. UART에서 1 Byte 수신
-2. 수신 Byte를 `Protocol_RxProcessByte()`에 전달
-3. START Byte 확인
-4. MSG_ID 저장
-5. DATA LENGTH 확인
-6. LENGTH만큼 DATA 저장
-7. Checksum 저장
-8. END Byte 확인
-9. `frame_complete` Flag 설정
-10. 완성된 Frame Decode
-11. Checksum 및 Frame 형식 검증
-12. 정상 Message만 Communication Task에서 처리
+### 비상정지 후 수동 복귀 도구: stepper_PC_Test.py
 
-```c
-Protocol_RxProcessByte(&rxParser, rxByte);
-```
+이 파일은 **긴급 정지를 건 뒤, 모터를 0° 쪽으로 조금씩 옮기기 위해 보존한 도구**다. 이번 문서 작업에서 파일 자체를 수정하지 않았다.
 
-Frame 처리가 완료되거나 오류가 발생하면 Parser 내부 상태와 DATA Buffer를 초기화합니다.
+COM4, 115200bps로 `CW,10` 또는 `CCW,10` 같은 문자열과 줄바꿈을 보내며 `STARTED` 등의 문자열 응답을 기다린다. `Q`는 프로그램 종료다. 절대각 0°를 찾아가는 자동 영점 복귀 기능이나 비상정지 송신 기능은 없다. 방향과 이동량은 사용자가 확인한다. 표시 문구는 최대 20°이지만 Python에서 입력 한도를 강제하지는 않는다.
 
----
+**현재 저장소의 STM 바이너리 명령 파서는 이 CW/CCW 문자열 형식을 처리하지 않는다.** 따라서 이 도구를 쓸 때는 그 문자열을 받는 기존 대응 펌웨어/환경이 필요하다. 현재 세 단계 시험 펌웨어에서 그대로 사용할 수 있다고 보아서는 안 된다. 해당 대응 펌웨어의 위치는 이 저장소에서 확인되지 않았다.
 
-## Parser Data Structure
+`prepare`의 단계와 대기는 Python에서 처리하며 STM은 변경하지 않는다. 각 서보 단계 직전 새 `0x84` 측정값을 최대 4초 기다린다. 입력 범위 밖 측정값은 전송하지 않고 중단한다. 대기 중 heartbeat는 유지한다. θ1 목표를 현재 측정값으로 보내도 STM의 새 측정값과 차이가 나면 스텝이 조금 움직일 수 있으며, 기존 역방향 보호도 유지된다. 첫 −50° 명령의 서보 속도를 제한하는 변경은 아니다. 이 prepare는 start가 `(0,0,0)`이 아닌 원호 계획에서는 거절한다.
 
-```c
-typedef struct
-{
-    ProtocolRxState_t state;
-    uint8_t msg_id;
-    uint8_t data_length;
-    uint8_t data_index;
-    uint8_t data[PROTOCOL_MAX_DATA_LENGTH];
-    uint8_t checksum;
-    uint8_t frame_complete;
-} ProtocolRxParser_t;
-```
+θ2의 −50°・−30°・0°와 3초 대기는 `three_stage_test.py`에 정의되어 있다. JSON은 `run/down` 목표를 제공하며, `prepare`에서는 start가 `(0,0,0)`인지 확인한다. 측정값은 단계 시작 후 새로 받은 값 중 수신 후 0.5초 이내인 값만 사용한다. 3초는 서보 실측 도착이 아닌 마지막 `DONE(1A)` 수신부터 계산한다. 각도 제한 정지 후에도 이 prepare가 복귀를 보장하지는 않는다. STM이 측정각 유지 목표를 거절하거나 PC가 범위 밖 측정값으로 중단할 수 있다.
 
-Parser 구조체 내부에 현재 수신 State, Message ID, DATA 길이, DATA Buffer, Checksum 및 Frame 완료 상태를 저장합니다.
+STM에 남아 있는 변경은 θ1 입력 상한 80°, 상승 중 실측 87° 정지, 각도 제한 정지의 조건부 하강 복귀, 정지 시 서보 목표 갱신 중단, HOME 범위 검사 및 θ1 테스트 오류 원인 보존이다. `prepare` 전용 명령이나 STM 내부 3초 대기는 추가하지 않았다. 패킷과 명령 ID는 기존 그대로다.
 
-이를 통해 UART 데이터가 여러 번에 나누어 수신되더라도 이전 수신 상태를 유지하면서 다음 Byte를 이어서 처리할 수 있습니다.
+### PS1과 이전 실험 파일
 
----
+`.ps1`은 Windows PowerShell 스크립트다. 이전 `record_encoder_stationary.ps1`은 정지 상태 엔코더 기록 작업을 실행하는 보조 스크립트였으며 파일 정리 때 삭제했다. STM에 올라가는 펌웨어가 아니고, 현재 두 Python 도구 실행에 필요하지 않다. 이전 개별 실험 Python과 기존 CSV 로그도 정리되었으며 백업 폴더는 보존했다.
 
-# Communication Task
+PC 도구가 일반 오류나 시간 초과로 이미 잠긴 경우, 뒤늦게 `0x03`이 도착해도 잠금을 해제하지 않는다. 원인 확인 후 `r` 완료가 필요하다.
 
-## Main Responsibilities
+호스트 회귀 테스트는 `python -B -m unittest -v test_three_stage_test`로 실행한다. 시리얼 연결이나 모터 이동 없이 명령 순서, 오류 우선순위, 늦은 응답, 목표 범위를 검사한다. 실제 보드 검증을 대신하지 않는다.
 
-Communication Task는 다음 기능을 담당합니다.
+## 소스 확인 위치
 
-- UART Byte 단위 수신
-- Frame Parser 실행
-- Frame Decode 및 Checksum 검증
-- HEARTBEAT Message 처리
-- ACK Frame 생성 및 송신
-- SET_TARGET Data 변환
-- Motor Command Queue 전달
-- Current Angle 주기 송신
-- Motor Status Queue 확인
-- MOVE_DONE / ERROR Frame 송신
-- Frame 수신 Timeout 감시
-- Heartbeat Timeout 감시
+- `Core/Src/motorTask.c`: 명령 실행, 각도 제한, HOME, 보정, 오류 상태.
+- `Core/Src/stepper.c`, `servo.c`: 내부 가감속 및 서보 목표 갱신.
+- `Core/Src/encoderTask.c`, `as5600.c`, `i2c.c`: 측정/영점/평균/통신 복구.
+- `Core/Src/communicationTask.c`, `uart_dma.c`, `protocol.c`, `Core/Inc/protocol.h`: 수신, 큐, 응답, 프레임 규격.
 
----
-
-## Heartbeat and ACK
-
-Jetson은 1초마다 Alive Counter를 포함한 HEARTBEAT Frame을 송신합니다.
-
-```text
-MSG_ID : 0x01
-LENGTH : 1 Byte
-DATA   : Alive Counter
-```
-
-STM32가 정상적인 HEARTBEAT Frame을 수신하면 다음 값을 갱신합니다.
-
-- 최근 Alive Counter
-- Heartbeat 수신 횟수
-- 마지막 Heartbeat 수신 시간
-- 통신 연결 상태
-
-이후 수신한 Message ID를 DATA에 포함한 ACK Frame을 Jetson으로 송신합니다.
-
-```text
-HEARTBEAT RX
-
-AA 01 01 [ALIVE_COUNTER] [CHECKSUM] 55
-```
-
-```text
-ACK TX
-
-AA 80 01 01 [CHECKSUM] 55
-```
-
-ACK의 DATA `0x01`은 STM32가 HEARTBEAT Message ID `0x01`을 정상적으로 수신했음을 의미합니다.
-
----
-
-## SET_TARGET Processing
-
-Communication Task가 `SET_TARGET` Message를 수신하면 DATA 길이가 6 Byte인지 확인합니다.
-
-정상적인 Frame이면 3개의 목표 각도를 Big-Endian `int16_t` 값으로 복원합니다.
-
-```c
-motorCommand.theta1_x10 =
-    Protocol_ReadInt16BigEndian(&rxMessage.data[0]);
-
-motorCommand.theta2_x10 =
-    Protocol_ReadInt16BigEndian(&rxMessage.data[2]);
-
-motorCommand.theta3_x10 =
-    Protocol_ReadInt16BigEndian(&rxMessage.data[4]);
-```
-
-변환된 목표 각도는 `motorCommandQueue`를 통해 Motor Task로 전달합니다.
-
-```text
-Communication Task
-        │
-        │ motorCommandQueue
-        │ θ1 / θ2 / θ3 Target Angle
-        ▼
-Motor Task
-```
-
-Queue 전달에 성공한 경우 STM32는 `SET_TARGET` Message에 대한 ACK를 송신합니다.
-
----
-
-## Motor Status Processing
-
-Motor Task에서 동작 완료 또는 오류가 발생하면 `motorStatusQueue`를 통해 Communication Task로 상태를 전달합니다.
-
-```text
-Motor Task
-        │
-        │ motorStatusQueue
-        │ MOVE_DONE / ERROR
-        ▼
-Communication Task
-```
-
-Communication Task는 수신한 상태에 따라 다음 Frame을 생성하여 Jetson으로 송신합니다.
-
-```text
-MOTOR_STATUS_MOVE_DONE → MSG_ID 0x82
-MOTOR_STATUS_ERROR     → MSG_ID 0x83
-```
-
----
-
-# Communication Error Handling
-
-## 1. START / END Byte Validation
-
-수신 Frame의 첫 번째 Byte가 `0xAA`인지 확인하고, 마지막 Byte가 `0x55`인지 확인합니다.
-
-값이 올바르지 않으면 해당 Frame을 폐기합니다.
-
----
-
-## 2. DATA Length Validation
-
-수신한 LENGTH가 `PROTOCOL_MAX_DATA_LENGTH`보다 큰 경우 잘못된 Frame으로 판단합니다.
-
-```c
-if (parser->data_length > PROTOCOL_MAX_DATA_LENGTH)
-{
-    Protocol_RxParserReset(parser);
-}
-```
-
-Parser를 초기화한 후 다음 START Byte부터 새로운 Frame 수신을 시작합니다.
-
----
-
-## 3. Checksum Validation
-
-수신한 Checksum과 STM32에서 다시 계산한 Checksum을 비교합니다.
-
-값이 일치하지 않으면 `PROTOCOL_ERROR_CHECKSUM`을 반환하고 해당 Message를 처리하지 않습니다.
-
----
-
-## 4. Incomplete Frame Timeout
-
-Frame 수신이 시작된 후 일정 시간 동안 다음 Byte가 들어오지 않으면 불완전한 Frame으로 판단합니다.
-
-```c
-#define PROTOCOL_RX_TIMEOUT_MS 20U
-```
-
-20 ms 동안 Frame 수신이 완료되지 않으면 Parser를 초기화합니다.
-
-```text
-Incomplete Frame
-      ↓
-20 ms Timeout
-      ↓
-Parser Reset
-      ↓
-Next START Byte Wait
-```
-
-이 구조를 통해 Frame 수신 도중 Jetson 프로그램이 종료되거나 데이터가 중간에 끊겨도 다음 정상 Frame을 다시 수신할 수 있습니다.
-
----
-
-## 5. Heartbeat Timeout
-
-일정 시간 동안 HEARTBEAT Message가 수신되지 않으면 Jetson과의 통신이 끊어진 것으로 판단합니다.
-
-```c
-#define HEARTBEAT_TIMEOUT_MS 3000U
-```
-
-3초 이상 Heartbeat가 수신되지 않으면 다음 상태를 설정합니다.
-
-```c
-communicationLost = 1U;
-```
-
-현재 구현본에서는 통신 단절 상태를 검출하며, 통신 단절 시 Motor 안전 정지 기능과의 연동은 개발 중입니다.
-
----
-
-# FreeRTOS Queue Integration
-
-통신 처리와 모터 제어 기능을 하나의 Task에서 모두 실행하지 않고, 각 기능을 독립적인 Task로 분리했습니다.
-
-### Communication Task → Motor Task
-
-```text
-motorCommandQueue
-```
-
-전달 데이터:
-
-- Command Type
-- θ1 Target Angle
-- θ2 Target Angle
-- θ3 Target Angle
-
-### Motor Task → Communication Task
-
-```text
-motorStatusQueue
-```
-
-전달 데이터:
-
-- MOVE_DONE
-- ERROR
-
-Queue를 이용하여 Communication Task가 Motor Task의 내부 동작에 직접 의존하지 않도록 구성했습니다.
-
-이를 통해 UART 통신 처리와 실제 모터 제어 기능을 분리하고, 각 Task가 자신의 역할에 집중할 수 있도록 설계했습니다.
-
----
-
-# PC Communication Test
-
-실제 Jetson 프로그램과 통합하기 전, Python과 USB-UART를 이용하여 PC–STM32 통신 기능을 검증했습니다.
-
-> PC 통신 검증에 사용한 `serialtest.py`는 ChatGPT를 활용하여 생성한 테스트 코드입니다.  
-> 본 코드는 최종 Jetson 프로그램이 아니라, STM32에 구현한 커스텀 프로토콜의 송수신 및 오류 처리 동작을 확인하기 위한 테스트 목적으로 사용했습니다.
-
-```text
-
-PC Python Test Program
-        ↕ UART
-STM32 Communication Task
-
-`serialtest.py`는 다음 기능을 수행합니다.
-
-- HEARTBEAT Frame 1초 주기 송신
-- Alive Counter 증가
-- SET_TARGET Frame 송신
-- 3개의 목표 각도 Big-Endian 변환
-- Frame Checksum 생성
-- ACK Frame 수신
-- CURRENT_ANGLE Frame 수신
-- MOVE_DONE Frame 수신
-- ERROR Frame 수신
-- 수신 Checksum 검증
-
-테스트 환경에 따라 COM Port를 변경해야 합니다.
-
-```python
-PORT = "COM9"
-BAUD = 115200
-```
-
-Python 실행에는 `pyserial`이 필요합니다.
-
-```bash
-pip install pyserial
-python serialtest.py
-```
-
----
-
-# Troubleshooting
-
-## UART 가변 길이 Frame Parsing 오류
-
-### Problem
-
-UART 데이터를 상태 머신 Parser로 처리하는 과정에서 정상적인 Frame을 송신했지만 Parsing 오류가 발생했습니다.
-
-### Analysis
-
-UART Baud Rate는 115200 bps로 설정했습니다.
-
-Start Bit 1개, Data Bit 8개, Stop Bit 1개를 사용하는 경우 1 Byte 전송에는 총 10 Bit가 필요합니다.
-
-```text
-1 Byte Transmission Time
-= 10 bits / 115200 bps
-≈ 86.8 μs
-```
-
-초기 수신 반복문에는 1 ms 지연이 포함되어 있었습니다.
-
-```text
-UART 1 Byte 전송 시간 : 약 86.8 μs
-수신 반복문 지연      : 1 ms
-```
-
-수신 처리 지연이 Byte 전송 간격보다 길어 연속적으로 들어오는 데이터를 정상적인 시점에 처리하지 못한다고 판단했습니다.
-
-### Solution
-
-- 수신 반복문의 불필요한 1 ms 지연 제거
-- UART 데이터를 1 Byte씩 수신
-- 수신 Byte를 즉시 상태 머신 Parser에 전달
-- 잘못된 LENGTH 수신 시 Parser 전체 초기화
-- 불완전한 Frame Timeout 처리 추가
-- Frame 완료 후 Parser Buffer 초기화
-
-### Result
-
-다음 동작을 확인했습니다.
-
-- 가변 길이 Frame 정상 수신
-- HEARTBEAT 수신
-- ACK Frame 응답
-- SET_TARGET 6 Byte DATA 수신
-- 잘못된 Checksum Frame 검출
-- 최대 길이를 초과한 LENGTH 검출
-- 잘못된 LENGTH 이후 정상 Frame 재수신
-- 불완전한 Frame Timeout 이후 정상 복구
-
----
-
-# Test Results
-
-| Test Item | Result |
-|---|---|
-| HEARTBEAT Frame 수신 | PASS |
-| ACK Frame 송신 | PASS |
-| 가변 길이 DATA 수신 | PASS |
-| SET_TARGET 6 Byte Parsing | Implemented |
-| XOR Checksum 검증 | PASS |
-| Invalid Checksum 검출 | PASS |
-| Invalid LENGTH 검출 | PASS |
-| Invalid LENGTH 이후 정상 복구 | PASS |
-| Incomplete Frame Timeout 복구 | PASS |
-| Current Angle 주기 송신 | Implemented |
-| Motor Command Queue 전달 | Implemented |
-| Motor Status Queue 수신 | Implemented |
-| Jetson 실제 프로그램 통합 | In Progress |
-| 전체 Motor System 통합 | In Progress |
-
-`PASS`는 PC–STM32 환경에서 동작을 확인한 항목이며, `Implemented`는 코드 구현 후 전체 시스템과의 추가 통합 검증이 필요한 항목입니다.
-
----
-
-# Main Source Files
-
-| File | Description |
-|---|---|
-| `protocol.c/.h` | Frame 생성, Decode, Checksum 및 RX State Machine Parser |
-| `communicationTask.c/.h` | UART 송수신, Heartbeat, ACK, Timeout 및 Queue 연동 |
-| `motorCommand.h` | Motor Command 및 Status 데이터 정의 |
-| `motorTask.c/.h` | 목표 각도 기반 Motor 제어 Task |
-| `encoderTask.c/.h` | Encoder 측정 Task |
-| `as5600.c/.h` | AS5600 I2C 통신 및 현재 각도 측정 |
-| `stepper.c/.h` | Stepper Motor 제어 |
-| `servo.c/.h` | Servo Motor 제어 |
-| `serialtest.py` | ChatGPT를 활용해 생성한 PC 기반 UART Protocol 테스트 코드 |
-
----
-
-# Project Structure
-
-```text
-Smart-Monitor-Arm-STM32-Firmware/
-├── Core/
-│   ├── Inc/
-│   │   ├── protocol.h
-│   │   ├── communicationTask.h
-│   │   ├── motorCommand.h
-│   │   ├── motorTask.h
-│   │   ├── encoderTask.h
-│   │   ├── as5600.h
-│   │   ├── stepper.h
-│   │   └── servo.h
-│   │
-│   └── Src/
-│       ├── protocol.c
-│       ├── communicationTask.c
-│       ├── motorTask.c
-│       ├── encoderTask.c
-│       ├── as5600.c
-│       ├── stepper.c
-│       └── servo.c
-│
-├── Drivers/
-├── Middlewares/
-├── serialtest.py
-├── capstone.ioc
-└── README.md
-```
-
----
-
-# Current Limitations
-
-현재 버전에는 다음 기능이 포함되지 않았거나 추가적인 검증이 필요합니다.
-
-- Jetson 영상 처리 프로그램과 STM32의 실제 통합
-- 전체 3축 Motor 제어 검증
-- ACK 미수신 시 자동 재전송
-- NACK Message 처리
-- Sequence Number 기반 중복 Frame 검출
-- XOR Checksum의 CRC 전환
-- 통신 단절 시 Motor 안전 정지
-- SET_HOME 기능 연동
-- MOVE_HOME 기능 연동
-- STATUS DATA 형식 확정
-- MOVE_DONE 최종 각도 DATA 추가
-- ERROR 세부 오류 코드 추가
-- UART Interrupt 또는 DMA 수신 방식 적용
-- 전체 시스템 장시간 통신 안정성 시험
-
----
-
-# Future Work
-
-- Jetson–STM32 실제 통합 송수신
-- 모터 제어 시스템 전체 연동
-- 통신 단절 시 안전 정지 구현
-- ACK Timeout 및 재전송 구조 추가
-- NACK 및 오류 코드 세분화
-- Sequence Number 추가
-- CRC 기반 오류 검출 검토
-- UART Interrupt / DMA 수신 방식 검토
-- 통신 상태 Log 저장
-- 장시간 반복 통신 시험
-- 전체 스마트 모니터 암 동작 영상 추가
-
----
-
-# What I Learned
-
-본 프로젝트를 통해 UART 통신은 단순히 데이터를 송수신하는 것만으로 끝나는 것이 아니라는 점을 배웠습니다.
-
-메시지 종류와 데이터 길이를 정의하고, Frame의 시작과 끝을 구분하며, 수신 오류와 통신 단절 상황까지 고려해야 안정적인 시스템을 구성할 수 있음을 경험했습니다.
-
-또한 고정 길이 수신 방식에서 가변 길이 상태 머신 Parser 구조로 변경하면서, 요구사항에 따라 확장할 수 있는 Protocol 구조를 설계하는 방법을 익혔습니다.
-
-잘못된 Checksum, 비정상 LENGTH 및 불완전한 Frame을 직접 입력해 본 뒤 정상 Frame으로 복구되는지 확인하며 오류 검출뿐만 아니라 오류 이후의 복구 과정도 중요하다는 점을 배웠습니다.
-
-FreeRTOS Queue를 이용해 Communication Task와 Motor Task를 분리하면서, Task 간 책임을 구분하고 데이터 흐름을 명확하게 설계하는 경험을 쌓았습니다.
-
----
-
-# Notice
-
-본 저장소는 국립한밭대학교 전자공학과 캡스톤디자인에서 진행 중인 프로젝트입니다.
-
-**2026년 8월 6일 기준의 개발 Snapshot이며, 전체 스마트 모니터 암 시스템의 최종 결과물이 아닙니다.**
-
-포트폴리오에 기재된 다음 기능은 구현되어 있습니다.
-
-- UART Custom Frame 설계
-- 상태 머신 기반 가변 길이 Parser
-- XOR Checksum 검증
-- HEARTBEAT 및 ACK
-- DATA LENGTH 오류 검출
-- Frame 수신 Timeout
-- 비정상 Frame 이후 Parser 복구
-- FreeRTOS Queue 기반 Communication Task–Motor Task 연동
-
-Jetson 영상 처리 프로그램, 전체 모터 제어부 및 하드웨어 시스템과의 통합은 계속 진행 중입니다.
-
----
-
+대표 진단값은 `encoderReadCount`, `encoderStatus`, `encoderHalError`, `debugI2CFailureCount`, `encoderRecoveryCount`, `debugTheta1CorrectionCount`, `debugTheta1PositionErrorDeg`, `debugPathFeedbackFault`, `motorState`다. `debugPathFeedbackFault`는 1=반대 방향 변화, 2=보정 오차 미감소이다. 마지막 오류 기록이 남아 있다는 사실만으로 현재도 실패 중이라고 판단하지 않고 읽기 카운트와 시각의 증가를 함께 확인한다.

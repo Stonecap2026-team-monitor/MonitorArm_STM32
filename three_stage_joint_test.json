@@ -1,0 +1,6 @@
+{
+  "description": "Joint-space protocol fixture, NOT an IK arc. prepare moves all axes to zero.",
+  "start": [0, 0, 0],
+  "up": [[20, -13.3, 10], [40, -26.7, 20], [60, -40, 30]],
+  "down": [[40, -26.7, 20], [20, -13.3, 10], [0, 0, 0]]
+}
